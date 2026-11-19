@@ -551,7 +551,7 @@ impl Bed {
             .collect()
     }
 
-    /// The Driver's traction history from the last physics step (`stop_contacts::reactions`).
+    /// Solver friction readout grouped by side, using the shipped face binding and transfer reader.
     fn hard_reactions(&mut self) -> [Option<crate::track::stop_contacts::HardReaction>; 2] {
         use crate::track::stop_contacts::{BeltFace, by_owner, reactions};
         use bevy::ecs::system::RunSystemOnce;
@@ -3003,7 +3003,7 @@ impl Straddle {
 /// the belt against (sprocket work plus same-step solver work, less belt kinetic gain).
 /// Brakes, clutch and finite-surface friction move energy among hull, belts and crank or spend
 /// it. Normal-row work is booked as the solver applied it; the vacated-band witness owns
-/// whether it was owed. Fixture: `Straddle`, eight seconds at full pedal across the sills.
+/// whether it was owed. The belt side trusts the surface adapter's work tally. Fixture: `Straddle`, eight seconds at full pedal across the sills.
 #[cfg(feature = "bitprobe")]
 #[test]
 fn the_drivetrains_books_close_over_standing_matter() {
@@ -3335,11 +3335,11 @@ fn slab_bed() -> Bed {
     bed
 }
 
-/// The Driver's loose-contact traction ledger must match hull momentum minus the normals'
-/// push. The shipped adapter must report each delivered exchange once, with its sign, while
+/// The shipped face binding and transfer reader report friction matching hull momentum minus
+/// the normals' push. Each delivered exchange is read once, with its sign, while
 /// solver-only support keeps sampled traction absent. Fixture: a one-second pull on a broad slab.
 #[test]
-fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
+fn solver_friction_readout_matches_hull_momentum_on_loose_pieces() {
     let mut bed = slab_bed();
     let start = bed.hull();
     let forward = (start.forward() * Vec3::new(1.0, 0.0, 1.0)).normalize();
@@ -3371,6 +3371,8 @@ fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
         magnitude += step.abs();
     }
     let momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward) - pushed;
+    // DERIVED: half the least step's grip impulse detects a lost or doubled step
+    // whenever that step delivers more than half its grip.
     let allowance = 0.5 * least_grip * DT;
     // DERIVED: each f32 addition errs by at most epsilon of a partial sum, below `magnitude`.
     let rounding = f32::EPSILON * pull as f32 * magnitude;
@@ -3431,4 +3433,182 @@ fn track_scorecard() {
         .map(|line| line.id)
         .collect();
     assert!(failed.is_empty(), "law checks failed: {failed:?}");
+}
+
+/// Awake parked-slab observation with the shipped suspension and body, including its settling.
+/// Fixture: 15 and 30 degree rigid slabs, eight seconds, at several substep lengths.
+#[test]
+#[ignore = "parked-slab creep observation; run on demand"]
+fn parked_solver_slab_creep() {
+    for n in [3, 6, 12] {
+        for degrees in [15.0_f32, 30.0] {
+            let mut bed = Bed::on_ground(Some(base_ground()), flat());
+            let rotation = Quat::from_rotation_x(degrees.to_radians());
+            let downhill = rotation * Vec3::Z;
+            let top = Vec3::Y * 10.0;
+            let slab = bed.spawn_body(
+                top - rotation * Vec3::Y * 0.2,
+                Vec3::new(30.0, 0.4, 30.0),
+                crate::construction::breakage::piece_layers(),
+            );
+            bed.app.world_mut().entity_mut(slab).insert((
+                RigidBody::Static,
+                Rotation(rotation),
+                Transform::from_translation(top - rotation * Vec3::Y * 0.2).with_rotation(rotation),
+            ));
+            bed.app.world_mut().insert_resource(SubstepCount(n));
+            bed.place(top + rotation * Vec3::Y * 0.002, rotation);
+            bed.app
+                .world_mut()
+                .entity_mut(bed.tank)
+                .insert(SleepingDisabled);
+            bed.start();
+            let mut frames = Vec::new();
+            for _ in 0..8 * TICKS {
+                bed.tick(0.0, 0.0);
+                assert!(
+                    bed.spring_forces().is_empty(),
+                    "slab witness requires solver-only support"
+                );
+                let probe = bed
+                    .app
+                    .world()
+                    .get::<crate::track::sim::TrackGripEffect>(bed.tank)
+                    .unwrap()
+                    .transmission_probe;
+                frames.push((
+                    bed.hull(),
+                    bed.center_of_mass(),
+                    probe.next_speeds,
+                    probe.brakes_slide,
+                ));
+            }
+            for (begin, end) in [(TICKS, 4 * TICKS), (5 * TICKS, 8 * TICKS)] {
+                let window = &frames[begin..end];
+                let first = window.first().unwrap();
+                let last = window.last().unwrap();
+                let speed = window
+                    .iter()
+                    .map(|f| f.0.velocity.dot(downhill))
+                    .sum::<f32>()
+                    / window.len() as f32;
+                let travel = (last.0.position - first.0.position).dot(downhill);
+                let com_travel = (last.1 - first.1).dot(downhill);
+                let belt_peak = window
+                    .iter()
+                    .flat_map(|f| f.2)
+                    .map(f32::abs)
+                    .fold(0.0, f32::max);
+                let sliding = window.iter().filter(|f| f.3).count();
+                println!(
+                    "MEASURED solver-slab {degrees} deg n={n}, window {}..{} s: mean speed {speed} m/s, origin travel {travel} m, COM travel {com_travel} m, end angular {:?} rad/s, belt peak {belt_peak} m/s, brake sliding ticks {sliding}",
+                    (begin + 1) as f32 * DT,
+                    end as f32 * DT,
+                    last.0.angular
+                );
+            }
+        }
+    }
+}
+
+/// Local two-worker observation of the Relax stage; an isolated run installs the host's compute
+/// allocation before booting the shipped composition. Timing is reported, never a pass condition.
+#[test]
+#[ignore = "two-worker contact cost observation; run in an isolated test process"]
+fn constrained_belt_relax_cost_with_two_workers() {
+    use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
+    use bevy::tasks::{ComputeTaskPool, TaskPoolBuilder};
+    let pool = ComputeTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(2).build());
+    assert_eq!(
+        pool.thread_num(),
+        2,
+        "run this observation alone to install the hosted allocation"
+    );
+    fn slippery_contacts(mut graph: ResMut<ConstraintGraph>) {
+        for row in graph
+            .colors
+            .iter_mut()
+            .flat_map(|color| &mut color.contact_constraints)
+        {
+            if row.surface_coordinates.iter().any(Option::is_some) {
+                row.friction = 0.01; // Fixture: low grip forces sliding points through the disk boundary solve.
+            }
+        }
+    }
+    for low_grip in [false, true] {
+        let mut bed = slab_bed();
+        if low_grip {
+            bed.app.add_systems(
+                PhysicsSchedule,
+                slippery_contacts
+                    .in_set(SolverSystems::PreSubstep)
+                    .after(crate::track::stop_contacts::prepare_belt_surfaces)
+                    .before(crate::contact_transfer::PrepareReading),
+            );
+        }
+        let mut costs = Vec::new();
+        let mut biased_costs = Vec::new();
+        let mut boundary = 0;
+        let mut points = 0;
+        for _ in 0..2 * TICKS {
+            bed.tick(1.0, 0.0);
+            biased_costs.push(
+                bed.app
+                    .world()
+                    .resource::<avian3d::dynamics::solver::SolverDiagnostics>()
+                    .solve_constraints
+                    .as_secs_f64()
+                    * 1e6,
+            );
+            costs.push(
+                bed.app
+                    .world()
+                    .resource::<avian3d::dynamics::solver::SolverDiagnostics>()
+                    .relax_velocities
+                    .as_secs_f64()
+                    * 1e6,
+            );
+            for row in bed
+                .app
+                .world()
+                .resource::<ConstraintGraph>()
+                .colors
+                .iter()
+                .flat_map(|c| &c.contact_constraints)
+            {
+                if row.surface_coordinates.iter().all(Option::is_none) {
+                    continue;
+                } // Ordinary slab/ground rows.
+                for point in &row.points {
+                    let Some(tangent) = &point.tangent_part else {
+                        continue;
+                    }; // Frictionless point.
+                    let radius = row.friction * point.normal_part.impulse;
+                    points += 1;
+                    // Resolution: f32 assembly of a disk-bound impulse.
+                    boundary += usize::from(
+                        radius > 0.0
+                            && tangent.impulse.length() >= radius * (1.0 - 8.0 * f32::EPSILON),
+                    );
+                }
+            }
+        }
+        println!(
+            "MEASURED two-worker solver-only slab biased contact pass, low_grip={low_grip}: mean {} us/tick",
+            biased_costs.iter().sum::<f64>() / biased_costs.len() as f64
+        );
+        costs.sort_by(f64::total_cmp);
+        println!(
+            "MEASURED two-worker solver-only slab Relax, low_grip={low_grip}: mean {} us/tick, median {} us/tick, peak {} us/tick; {boundary}/{points} final-substep points on the disk boundary",
+            costs.iter().sum::<f64>() / costs.len() as f64,
+            costs[costs.len() / 2],
+            costs.last().unwrap()
+        );
+        if low_grip {
+            assert!(
+                boundary > 0,
+                "the sliding-cost witness must exercise the Coulomb boundary"
+            );
+        }
+    }
 }

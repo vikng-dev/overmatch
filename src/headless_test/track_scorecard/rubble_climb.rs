@@ -1382,8 +1382,7 @@ fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
 
 /// Each piece in the tank's island still failing the rest test this tick (awake, its rest timer
 /// under `TimeToSleep`), with its motion and every touching manifold in the hull's frame: the other
-/// collider's role, the normal into the piece, the deepest overlap, the compliant law and conveyor
-/// velocity the solver used, and the solver's mean force on the piece over the step. The force
+/// collider's role, the normal into the piece, the deepest overlap, the compliant law and the solver's mean force on the piece over the step. The force
 /// is the collider pair's, repeated on each of its manifolds.
 fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
     use avian3d::dynamics::solver::islands::BodyIslandNode;
@@ -1461,10 +1460,6 @@ fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
                         "points": manifold.points.len(),
                         "k": law.as_ref().map(|c| c.stiffness),
                         "c": law.as_ref().map(|c| c.damping),
-                        "conveyor": local(world.resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>().colors.iter()
-                            .flat_map(|c| &c.contact_constraints)
-                            .find(|c| c.contact_id == pair.contact_id && c.manifold_index == manifold_index)
-                            .map_or(Vec3::ZERO, |c| c.tangent_velocity)),
                         "force": local(force),
                     }));
                 }

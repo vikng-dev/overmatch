@@ -904,3 +904,49 @@ fn accepted_faces_warm_the_next_solve_until_the_layout_changes() {
     assert_eq!(changed.assignments_tried, fresh.assignments_tried);
     assert_eq!(changed.speeds, fresh.speeds);
 }
+
+/// Contacts rely on a held stop having zero mobility and a locked shaft reflecting its inertia.
+/// The same row at capacity must release that mobility; a timestep is absent from this law.
+#[test]
+fn constrained_mobility_reflects_inertia_and_releases_exhausted_stops() {
+    let speeds = [speed(0.0, 3.0, 0.0), speed(0.0, 7.0, 0.0)];
+    let clutch = row(&[1.0, -2.0], 100.0);
+    let locked = solve(&speeds, std::slice::from_ref(&clutch));
+    let mobility = locked
+        .response(&speeds, std::slice::from_ref(&clutch), &[])
+        .mobility;
+    let expected = 1.0 / (7.0 + 3.0 * 2.0 * 2.0);
+    // Resolution: f64 KKT elimination and inertial projection.
+    assert!((mobility[1][1] - expected).abs() < 1e-12);
+    assert!((mobility[1][0] - 2.0 * expected).abs() < 1e-12);
+    let response = locked.response(&speeds, std::slice::from_ref(&clutch), &[]);
+    let shifted = response
+        .apply(&locked, std::slice::from_ref(&clutch), &[], &[0.0, 3.0])
+        .unwrap();
+    assert!((shifted.speeds[1] - 3.0 * expected).abs() < 1e-12);
+    let rows = [clutch, row(&[0.0, 1.0], 4.0)];
+    for impulse in [2.0, 8.0] {
+        let loaded = [speeds[0], speed(0.0, 7.0, impulse)];
+        let solved = solve(&loaded, &rows);
+        let mobility = solved.response(&loaded, &rows, &[]).mobility;
+        if impulse < 4.0 {
+            let response = solved.response(&loaded, &rows, &[]);
+            assert!(
+                response.apply(&solved, &rows, &[], &[0.0, 6.0]).is_none(),
+                "crossing a bound must leave the cached face"
+            );
+            assert_eq!(
+                response
+                    .apply(&solved, &rows, &[], &[0.0, 1.0])
+                    .unwrap()
+                    .speeds[1],
+                0.0
+            );
+            assert_eq!(mobility[1][1], 0.0);
+            assert_eq!(solved.speeds[1], 0.0);
+        } else {
+            assert!((mobility[1][1] - expected).abs() < 1e-12);
+            assert!(solved.speeds[1] > 0.0);
+        }
+    }
+}

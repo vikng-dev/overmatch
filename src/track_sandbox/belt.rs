@@ -277,7 +277,7 @@ pub(super) fn apply_belt_support_field(
         },
     );
     tick.warm = std::mem::take(&mut pending.1);
-    pending.0 = Some(tick);
+    pending.0 = Some(crate::track::sim::PendingDrive::Awake(tick));
 
     touches.0.clear();
     for (si, report) in reports.into_iter().enumerate() {
@@ -317,14 +317,13 @@ pub(super) fn apply_belt_support_field(
 /// Empty until the first sampled pass; built with the rig's other simulation storage.
 #[derive(Resource, Default)]
 pub(super) struct PendingDrivetrain(
-    Option<transmission::DriveTick>,
+    Option<crate::track::sim::PendingDrive>,
     transmission::WarmStart,
-    // Contact-only state before the first sampled motor pass.
-    Option<([f32; 2], [f64; 2])>,
 );
 
 pub(super) fn drivetrain_plugin(app: &mut App) {
     use avian3d::prelude::*;
+    crate::avian_ext::surface_motion::register();
     app.init_resource::<PendingDrivetrain>()
         .add_systems(
             PhysicsSchedule,
@@ -342,8 +341,7 @@ pub(super) fn drivetrain_plugin(app: &mut App) {
         )
         .add_systems(
             SubstepSchedule,
-            (collect_surface_speeds, advance_drivetrain)
-                .chain()
+            collect_surface_speeds
                 .after(SubstepSolverSystems::Relax)
                 .before(avian3d::dynamics::solver::xpbd::XpbdSolverSystems::SolveConstraints)
                 .run_if(sim_running)
@@ -358,61 +356,57 @@ pub(super) fn drivetrain_plugin(app: &mut App) {
         );
 }
 
-fn advance_drivetrain(
-    time: Res<Time<avian3d::prelude::Substeps>>,
-    rig: Res<RigSpec>,
-    transmission: Res<RigTransmission>,
-    mut pending: ResMut<PendingDrivetrain>,
-) {
-    if let Some(tick) = pending.0.as_mut() {
-        // No sample before the first fixed driving pass.
-        tick.advance(
-            &transmission::DriveConstruction::new(rig.grip, rig.belt_inertia),
-            &transmission.0,
-            time.delta_secs(),
-        );
-    }
-}
-
 fn prepare_surface_speeds(
     mut bodies: ResMut<avian3d::dynamics::solver::solver_body::SolverBodies>,
     rig: Res<RigSpec>,
-    pending: Res<PendingDrivetrain>,
+    transmission: Res<RigTransmission>,
+    state: (Res<TransState>, Res<BeltSpeed>, Res<BeltPhase>),
+    mut pending: ResMut<PendingDrivetrain>,
     hull: Query<Option<&avian3d::dynamics::solver::solver_body::SolverBodyIndex>, With<Hull>>,
-    belt: Res<BeltSpeed>,
+    time: Res<Time<avian3d::prelude::Substeps>>,
 ) {
-    use avian3d::dynamics::solver::solver_body::SurfaceSpeed;
+    let (state, belt, phase) = state;
     let Some(index) = hull
         .single()
         .expect("the built sandbox has exactly one hull")
     else {
         return; // A sleeping hull has no active contact solve.
     };
-    let speeds = pending
-        .0
-        .as_ref()
-        .map(|tick| tick.state.speeds)
-        .or_else(|| pending.2.map(|state| state.0))
-        .unwrap_or_else(|| Side::ALL.map(|side| belt.get(side)));
-    bodies
-        .get_mut(*index)
-        .expect("the active sandbox hull has solver state")
-        .surface_speeds = speeds
-        .map(|velocity| SurfaceSpeed {
-            velocity,
-            inverse_inertia: 1.0 / rig.belt_inertia,
-            work: 0.0,
-        })
-        .into();
+    let fp = transmission::DriveConstruction::new(rig.grip, rig.belt_inertia);
+    let pending = pending.0.get_or_insert_with(|| {
+        crate::track::sim::PendingDrive::ContactOnly(transmission::DriveTick::contact_only(
+            &fp,
+            &transmission.0,
+            transmission::DriveState {
+                transmission: state.0,
+                speeds: Side::ALL.map(|s| belt.get(s)),
+                phases: Side::ALL.map(|s| phase.get(s)),
+            },
+            crate::track::drive::DriveTarget {
+                intent: crate::track::drive::DriveIntent::Axes(
+                    crate::track::drive::DriveAxes::default(),
+                ),
+                supply: transmission::DriveSupply::WHOLE,
+            },
+            time.delta_secs(),
+        ))
+    });
+    pending
+        .tick_mut()
+        .prepare_contact(&fp, &transmission.0, time.delta_secs(), false)
+        .install(
+            bodies
+                .get_mut(*index)
+                .expect("an active sandbox hull has solver state"),
+        );
 }
 
 fn collect_surface_speeds(
-    bodies: Res<avian3d::dynamics::solver::solver_body::SolverBodies>,
+    mut bodies: ResMut<avian3d::dynamics::solver::solver_body::SolverBodies>,
     hull: Query<Option<&avian3d::dynamics::solver::solver_body::SolverBodyIndex>, With<Hull>>,
     mut pending: ResMut<PendingDrivetrain>,
+    transmission: Res<RigTransmission>,
     time: Res<Time<avian3d::prelude::Substeps>>,
-    belt: Res<BeltSpeed>,
-    phase: Res<BeltPhase>,
 ) {
     let Some(index) = hull
         .single()
@@ -420,36 +414,24 @@ fn collect_surface_speeds(
     else {
         return; // A sleeping hull has no active contact solve.
     };
-    let body = bodies
-        .get(*index)
-        .expect("the active sandbox hull has solver state");
-    assert_eq!(
-        body.surface_speeds.len(),
-        2,
-        "both belt coordinates precede warm start"
-    );
-    let speeds = [
-        body.surface_speeds[0].velocity,
-        body.surface_speeds[1].velocity,
-    ];
-    if let Some(tick) = &mut pending.0 {
-        tick.state.speeds = speeds;
-        #[cfg(feature = "bitprobe")]
-        {
-            tick.belt_work.solver_work_j += body.surface_speeds.iter().map(|s| s.work).sum::<f64>();
-        }
-    } else {
-        // Before sampling, only contact momentum and travel advance.
-        let (before, mut phases) = pending.2.take().unwrap_or_else(|| {
-            (
-                Side::ALL.map(|side| belt.get(side)),
-                Side::ALL.map(|side| phase.get(side)),
-            )
-        });
-        for (phase, speed) in phases.iter_mut().zip(before) {
-            *phase += f64::from(speed * time.delta_secs());
-        }
-        pending.2 = Some((speeds, phases));
+    let tick = pending
+        .0
+        .as_mut()
+        .expect("surface preparation creates this interval's mechanical state")
+        .tick_mut();
+    if let Some(coordinates) = crate::avian_ext::surface_motion::read_back(
+        bodies
+            .get(*index)
+            .expect("an active sandbox hull has solver state"),
+        tick,
+        &transmission.0,
+        time.delta_secs(),
+    ) {
+        coordinates.install(
+            bodies
+                .get_mut(*index)
+                .expect("the hull's solver index survives readback"),
+        );
     }
 }
 
@@ -467,27 +449,17 @@ fn commit_drivetrain(
     mut dynamics: ResMut<SideDynamics>,
     mut hull: Query<&mut crate::track::sim::TrackDrive, With<Hull>>,
 ) {
-    let Some(tick) = pending.0.take() else {
-        if let Some((speeds, phases)) = pending.2.take() {
-            let mut motion = hull
-                .single_mut()
-                .expect("the built sandbox has exactly one hull");
-            for side in Side::ALL {
-                let i = side.index();
-                belt.set(side, speeds[i]);
-                phase.set(side, phases[i]);
-                motion.sides[i] = crate::track::sim::TrackDriveSide {
-                    speed: speeds[i],
-                    phase: phases[i],
-                };
-            }
-        }
-        return; // No sampled motor pass yet.
-    };
+    let Some(prepared) = pending.0.take() else {
+        return;
+    }; // No physics interval ran.
+    let sampled = matches!(prepared, crate::track::sim::PendingDrive::Awake(_));
+    let tick = prepared.into_tick();
     let report = tick.report(substeps.0);
     pending.1 = tick.warm;
     state.0 = tick.state.transmission;
-    state.1.drove(&report);
+    if sampled {
+        state.1.drove(&report);
+    }
     telemetry.0 = Some(report);
     let mut motion = hull
         .single_mut()

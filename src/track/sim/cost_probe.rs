@@ -41,9 +41,9 @@ pub(crate) fn install(app: &mut App) {
                 end.after(prepare_surface_speeds)
                     .before(SubstepSolverSystems::WarmStart),
                 start
-                    .after(collect_surface_speeds)
-                    .before(advance_drivetrains),
-                end.after(advance_drivetrains)
+                    .after(SubstepSolverSystems::Relax)
+                    .before(collect_surface_speeds),
+                end.after(collect_surface_speeds)
                     .before(avian3d::dynamics::solver::xpbd::XpbdSolverSystems::SolveConstraints),
             ),
         )

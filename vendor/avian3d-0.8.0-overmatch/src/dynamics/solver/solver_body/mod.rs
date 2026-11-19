@@ -22,24 +22,29 @@ use super::Rot;
 use crate::prelude::ComputedAngularInertia;
 use crate::{SymmetricTensor, math::Vector, prelude::LockedAxes};
 
-/// OVERMATCH PATCH: one independently owned moving-surface velocity, prepared by an adapter
-/// before warm start. This is solver scratch, never a body's persistent simulation state.
-#[derive(Clone, Debug, Default, PartialEq, Reflect)]
-#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
-pub struct SurfaceSpeed {
-    /// Scalar surface speed in the adapter's units.
-    pub velocity: f32,
-    /// Inverse scalar inertia; zero denotes a prescribed surface.
-    pub inverse_inertia: f32,
-    /// Work transferred to this coordinate during the substep (J).
-    pub work: f64,
+/// OVERMATCH PATCH: cloneable adapter-owned scratch under graph-colored body ownership.
+pub trait SurfaceData: core::any::Any + Send + Sync + core::fmt::Debug {
+    /// Clone scratch when its solver body is cloned.
+    fn clone_box(&self) -> Box<dyn SurfaceData>;
+}
+
+/// OVERMATCH PATCH: transient, adapter-typed scratch; rebuilt before contact solving.
+#[derive(Debug)]
+pub struct SurfaceScratch(
+    /// The adapter's owned state.
+    pub Box<dyn SurfaceData>,
+);
+impl Clone for SurfaceScratch {
+    fn clone(&self) -> Self {
+        Self(self.0.clone_box())
+    }
 }
 
 /// OVERMATCH PATCH: a surface coordinate's coefficient in relative contact velocity.
 #[derive(Clone, Copy, Debug, PartialEq, Reflect)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct SurfaceCoordinate {
-    /// Index into the corresponding solver body's surface speeds.
+    /// Adapter-defined scalar coordinate in its body's scratch.
     pub index: usize,
     /// World-space coefficient of this scalar in relative contact velocity.
     pub direction: Vector,
@@ -86,7 +91,9 @@ pub struct SurfaceCoordinate {
 #[reflect(Debug)]
 pub struct SolverBody {
     /// OVERMATCH PATCH: owner-local coordinates for a custom surface friction law.
-    pub surface_speeds: Vec<SurfaceSpeed>,
+    #[reflect(ignore)]
+    #[cfg_attr(feature = "serialize", serde(skip))]
+    pub surface_scratch: Option<SurfaceScratch>,
     /// The linear velocity of the body.
     ///
     /// 8 bytes in 2D and 12 bytes in 3D.
@@ -123,7 +130,7 @@ pub struct SolverBody {
 impl SolverBody {
     /// A dummy [`SolverBody`] for static bodies.
     pub const DUMMY: Self = Self {
-        surface_speeds: Vec::new(),
+        surface_scratch: None,
         linear_velocity: Vector::ZERO,
         #[cfg(feature = "2d")]
         angular_velocity: 0.0,

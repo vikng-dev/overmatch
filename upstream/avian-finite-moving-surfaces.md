@@ -23,23 +23,29 @@ The existing 0.8.0 mechanisms cannot supply that coordinate:
   travel has independent inertia. Neither a translating nor a rotating rigid body expresses
   that motion; separate physical links would replace the admitted belt model and geometry.
 
-The local extension exposes scalar surface coordinates in `SolverBody` and their coefficients
-on `ContactConstraint`. An optional friction hook runs under the existing graph coloring, after
-the normal row. It also receives warm start after the rigid-body warm impulse. The hook owns
-its actual applied accumulator; its readback must not subtract an unapplied warm-start share a
-second time. Ordinary contacts keep the upstream path. Hook function pointers are transient;
-an adapter reattaches them after serialization.
+The local extension exposes adapter-typed, cloneable transient scratch in `SolverBody` and
+surface-coordinate coefficients on `ContactConstraint`. One process-wide friction callback is
+registered before any coordinates are bound. It runs under graph coloring after both normal
+passes, including before position integration, and receives warm start after the rigid-body warm
+impulse. Its accumulator records the applied
+impulse; game-side readers share one accessor for that convention. Ordinary contacts retain stock
+friction. Scratch is rebuilt before solving, including after deserialization.
 
-The game-side seam at `src/avian_ext/surface_motion.rs` solves the two tangent coordinates on a
-Coulomb disk using the sum of rigid-body and surface inverse inertias. The same impulse changes
-all participating coordinates before the next contact. Zero-mobility directions are explicit
-in the positive-semidefinite metric. The only numerical policy is resolution of the small
-metric and disk minimization; there is no speed bound or material parameter in the hook.
+The game owns all mechanics and energy bookkeeping. It prepares the crank/belt block once per
+substep, then eliminates its bounded brake, clutch and steering rows inside the Coulomb-disk
+contact minimization. A holding brake has zero mobility within capacity; locked clutches reflect
+crank inertia, and sampled reaction slopes contribute to the response. Each candidate reuses the
+same free momentum and impulse bounds. Static capacity can shrink to sliding capacity during the
+solve, never receive a new budget. Both normal passes share that budget and one accumulated
+contact impulse. The affine response on a KKT face is cached only while the full solve's
+feasibility and complementarity checks certify it. Readback commits the resulting crank and
+belt speeds once.
 
-The native-constraint witnesses vary the body/surface mass ratio, warm-start scale and friction
-budget, derive the expected impulse from those inputs, and check energy dissipation. Another
-witness covers two finite surfaces. The production-adapter regression proves that already
-delivered contact history cannot be integrated as a new belt load.
+Native-constraint witnesses cover mass ratios, scaled warm starts, energy, and both bodies'
+linear and angular momentum at nonzero anchors. Production scheduling witnesses compare final
+solver speeds to the next drivetrain state directly; an awake parked-slab witness varies slope
+and substep length. Contact history is reporting only. The fork adds ownership and dispatch,
+with no belt law, drivetrain policy or work tally.
 
 An upstream API could choose another representation for extra surface coordinates. This draft
 records the needed ownership, warm-start and readback contracts, rather than proposing a game

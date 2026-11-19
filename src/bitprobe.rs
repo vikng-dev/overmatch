@@ -263,8 +263,6 @@ pub(crate) struct BeltWorkProbe {
     pub sprocket_work_j: [f64; 2],
     /// Work transferred to the finite belts by solver friction in the same substep (J).
     pub solver_work_j: f64,
-    /// Time-centred travel for force work, distinct from explicit phase advection.
-    pub travel_m: [f64; 2],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

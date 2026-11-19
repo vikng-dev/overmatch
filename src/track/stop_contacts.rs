@@ -112,21 +112,14 @@ impl BeltFace {
         rise <= 0.0 || depth > rise + VACATED_SLACK_M
     }
 
-    /// The moving face's world-space surface velocity (m/s) at the manifold centre.
-    pub(crate) fn velocity(
-        &self,
-        centre: Vec3,
-        outward: Vec3,
-        pose: (Vec3, Quat),
-        speed: f32,
-    ) -> Vec3 {
+    /// Positive belt travel in world space at the manifold centre.
+    pub(crate) fn world_direction(&self, centre: Vec3, outward: Vec3, pose: (Vec3, Quat)) -> Vec3 {
         let (position, rotation) = pose;
         rotation
             * self.direction(
                 rotation.inverse() * (centre - position),
                 rotation.inverse() * outward,
             )
-            * speed
     }
 
     /// Positive belt travel in the hull frame. Radial contact follows its plane's tangent;
@@ -244,7 +237,7 @@ fn bind_surface(
     faces: &Query<(&BeltFace, &ColliderOf)>,
     poses: &Query<(&Position, &Rotation)>,
 ) {
-    use avian3d::dynamics::solver::{contact::SurfaceFrictionHook, solver_body::SurfaceCoordinate};
+    use avian3d::dynamics::solver::solver_body::SurfaceCoordinate;
     let points = &pair.manifolds[constraint.manifold_index].points;
     let centre = points.iter().map(|point| point.point).sum::<Vec3>() / points.len() as f32;
     constraint.surface_coordinates =
@@ -258,19 +251,13 @@ fn bind_surface(
             Some(SurfaceCoordinate {
                 index: face.side.index(),
                 direction: sign
-                    * face.velocity(
+                    * face.world_direction(
                         centre,
                         -sign * constraint.normal,
                         (position.0, rotation.0),
-                        1.0,
                     ),
             })
         });
-    constraint.surface_hook = constraint
-        .surface_coordinates
-        .iter()
-        .any(Option::is_some)
-        .then_some(SurfaceFrictionHook(crate::avian_ext::surface_motion::solve));
 }
 
 /// Avian retains constraint geometry throughout its substep loop. Bind each contact once;
@@ -486,7 +473,7 @@ mod tests {
                             assert_eq!(pair.manifolds[0].friction, 0.37);
                             assert_eq!(pair.manifolds[0].tangent_velocity, Vec3::ZERO, "the hook never publishes tick-start belt speed");
                             let mut constraint = ContactConstraint {
-                                surface_coordinates: [None; 2], surface_hook: None,
+                                surface_coordinates: [None; 2],
                                 body_index1: SolverBodyIndex::INVALID, body_index2: SolverBodyIndex::INVALID,
                                 relative_dominance: 0, friction: 0.37, restitution: 0.0,
                                 tangent_velocity: Vec3::ZERO, normal: pair.manifolds[0].normal,
@@ -497,7 +484,7 @@ mod tests {
                             let coordinate = constraint.surface_coordinates[side].unwrap();
                             assert_eq!(coordinate.index, Side::Left.index());
                             assert!(constraint.surface_coordinates[1-side].is_none());
-                            assert!(constraint.surface_hook.is_some());
+                            assert!(constraint.surface_coordinates.iter().any(Option::is_some));
                             // Resolution: repeated world/local rotations differ by f32 roundoff.
                             assert!((coordinate.direction-sign*(rotation*direction)).length()<1e-5);
                         })
@@ -508,7 +495,7 @@ mod tests {
     }
 
     /// Belt-on-belt contacts bind both owners, including the overflow color. Ordinary contacts
-    /// keep their prescribed-surface contract; removing a face leaves no cached owner path.
+    /// keep their prescribed-surface contract.
     #[test]
     fn both_surface_bindings_follow_pair_order_including_overflow() {
         bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
@@ -542,7 +529,6 @@ mod tests {
         world.insert_resource(contacts);
         let constraint = |contact_id| ContactConstraint {
             surface_coordinates: [None; 2],
-            surface_hook: None,
             body_index1: SolverBodyIndex::INVALID,
             body_index2: SolverBodyIndex::INVALID,
             relative_dominance: 0,
@@ -563,24 +549,19 @@ mod tests {
             world.run_system_once(prepare_belt_surfaces).unwrap();
             let mut graph = world.resource_mut::<ConstraintGraph>();
             let rows = &mut graph.colors[color].contact_constraints;
-            assert!(rows[0].surface_hook.is_none() && rows[2].surface_hook.is_none());
+            assert!(
+                rows[0].surface_coordinates.iter().all(Option::is_none)
+                    && rows[2].surface_coordinates.iter().all(Option::is_none)
+            );
             assert_eq!(rows[0].tangent_velocity, Vec3::X);
             assert_eq!(rows[2].tangent_velocity, Vec3::X);
-            assert!(rows[1].surface_hook.is_some());
+            assert!(rows[1].surface_coordinates.iter().any(Option::is_some));
             let coordinates = rows[1].surface_coordinates.map(Option::unwrap);
             assert!(coordinates.iter().all(|c| c.index == Side::Left.index()));
             // Fixture speeds: the two exposed faces contribute to the same relative row.
             assert_eq!(
                 coordinates[0].direction * 3.0 + coordinates[1].direction * 5.0,
                 -8.0 * Vec3::Z
-            );
-            rows.remove(1);
-            world.run_system_once(prepare_belt_surfaces).unwrap();
-            assert!(
-                world.resource::<ConstraintGraph>().colors[color]
-                    .contact_constraints
-                    .iter()
-                    .all(|r| r.surface_hook.is_none())
             );
         }
     }

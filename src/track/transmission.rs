@@ -1653,18 +1653,50 @@ fn coupling_budget(
     }
 }
 
-/// One block owns the crank and both belts. Ground slopes augment belt inertia; their affine
-/// offsets preserve the supplied starting reactions. Every row impulse is billed to every
-/// coordinate of its Jacobian, including the crank's steering work.
-fn advance_rows(
+/// The crank and belts share bounded rows; contact impulses enter their free momenta.
+#[derive(Clone, Debug)]
+pub(crate) struct MechanicalRows {
+    pub(crate) speeds: Vec<super::block::Speed>,
+    pub(crate) rows: Vec<super::block::Row>,
+    pub(crate) limits: Vec<super::block::ImpulseLimit>,
+    clutches: Vec<usize>,
+    steering: Option<usize>,
+    stops: std::ops::Range<usize>,
+}
+
+impl MechanicalRows {
+    pub(crate) fn solve(&self, impulses: [f64; 2], warm: &mut WarmStart) -> super::block::Solution {
+        let mut speeds = self.speeds.clone();
+        for (speed, impulse) in speeds[1..].iter_mut().zip(impulses) {
+            speed.free_impulse += impulse;
+        }
+        super::block::solve_limited(&speeds, &self.rows, &self.limits, warm)
+    }
+
+    pub(crate) fn potential(&self, solved: &super::block::Solution) -> f64 {
+        // The minimized dual plus free kinetic energy has gradient equal to solved speed.
+        self.speeds
+            .iter()
+            .zip(&solved.speeds)
+            .map(|(s, v)| 0.5 * s.inertia * v * v)
+            .sum::<f64>()
+            - self
+                .rows
+                .iter()
+                .zip(&solved.rows)
+                .map(|(r, p)| r.target * p.impulse)
+                .sum::<f64>()
+    }
+}
+
+fn prepare_rows(
     fp: &DriveConstruction,
     tp: &TransmissionParams,
-    st: &mut TransmissionState,
+    st: &TransmissionState,
     controls: &Controls,
     tau_free: f32,
-    warm: &mut WarmStart,
-) -> (TransmissionReport, f32, f32) {
-    use super::block::{Bounds, ImpulseLimit, Row, Speed, solve_limited};
+) -> MechanicalRows {
+    use super::block::{Bounds, ImpulseLimit, Row, Speed};
     let inp = &controls.input;
     let dt = f64::from(inp.dt);
     let k = f64::from(controls.ratio / tp.sprocket_radius);
@@ -1740,7 +1772,7 @@ fn advance_rows(
     let capacity = f64::from(tp.brake_capacity_n) * dt;
     let first_stop = rows.len();
     rows.extend(passive_rows(tp, st, controls, capacity));
-    let mut stops = first_stop..rows.len();
+    let stops = first_stop..rows.len();
     if controls.ceiling
         && !controls.clutch_open
         && !controls.mean_hold
@@ -1764,18 +1796,39 @@ fn advance_rows(
         }
     }
 
-    let solved = solve_limited(
-        &speeds,
-        &rows,
-        &[ImpulseLimit {
-            coefficients: rows.iter().map(|r| r.jacobian[0]).collect(),
-            bounds: Bounds {
-                lower: floor_impulse,
-                upper: over_impulse,
-            },
-        }],
-        warm,
-    );
+    let limits = vec![ImpulseLimit {
+        coefficients: rows.iter().map(|r| r.jacobian[0]).collect(),
+        bounds: Bounds {
+            lower: floor_impulse,
+            upper: over_impulse,
+        },
+    }];
+    MechanicalRows {
+        speeds,
+        rows,
+        limits,
+        clutches,
+        steering,
+        stops,
+    }
+}
+
+fn finish_rows(
+    st: &mut TransmissionState,
+    controls: &Controls,
+    mechanical: &MechanicalRows,
+    solved: &super::block::Solution,
+) -> (TransmissionReport, f32, f32) {
+    let MechanicalRows {
+        rows,
+        clutches,
+        steering,
+        stops,
+        ..
+    } = mechanical;
+    let mut stops = stops.clone();
+    let inp = &controls.input;
+    let dt = f64::from(inp.dt);
     let mut forces = [0.0_f64; 2];
     for (row, outcome) in rows.iter().zip(&solved.rows) {
         for (force, coefficient) in forces.iter_mut().zip(&row.jacobian[1..]) {
@@ -1810,6 +1863,10 @@ fn advance_rows(
     if locked && controls.propulsive >= dead() {
         st.launch = LaunchState::Locked;
     }
+    assert!(
+        solved.speeds.iter().all(|v| (*v as f32).is_finite()),
+        "the solved crank and belt speeds must fit their finite public representation"
+    );
     st.omega_e = solved.speeds[0] as f32;
     let driving = clutches.iter().any(|&i| solved.rows[i].impulse < 0.0);
     let next_speeds = [solved.speeds[1] as f32, solved.speeds[2] as f32];
@@ -1857,6 +1914,19 @@ fn advance_rows(
         clutch_torque as f32,
         steer_force,
     )
+}
+
+fn advance_rows(
+    fp: &DriveConstruction,
+    tp: &TransmissionParams,
+    st: &mut TransmissionState,
+    controls: &Controls,
+    tau_free: f32,
+    warm: &mut WarmStart,
+) -> (TransmissionReport, f32, f32) {
+    let mechanical = prepare_rows(fp, tp, st, controls, tau_free);
+    let solved = mechanical.solve([0.0; 2], warm);
+    finish_rows(st, controls, &mechanical, &solved)
 }
 
 fn requests_other_ladder(command: f32, reverse: bool) -> bool {
@@ -2179,16 +2249,27 @@ fn advance_shift_window(st: &mut TransmissionState) -> bool {
     shifting
 }
 
-/// Advance one owner's mechanical state under tick-constant orders and affine sampled loads.
-/// The same operation serves live substeps, resting trials and the sandbox.
-pub(crate) fn advance(
+/// One interval's free momentum and bounded rows, shared by live contacts and resting trials.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedDrive {
+    pub(crate) mechanical: MechanicalRows,
+    controls: Controls,
+    power: f32,
+    omega_pre: f32,
+    mean: f32,
+    ratio: f32,
+    k: f32,
+    #[cfg(feature = "bitprobe")]
+    probe: TransmissionProbe,
+}
+
+pub(crate) fn prepare_advance(
     fp: &DriveConstruction,
     tp: &TransmissionParams,
-    state: &mut DriveState,
+    state: &DriveState,
     orders: &Orders,
-    warm: &mut WarmStart,
     h: f32,
-) -> TransmissionReport {
+) -> PreparedDrive {
     assert!(
         h.is_finite() && h > 0.0,
         "a mechanical substep has a positive finite duration"
@@ -2203,7 +2284,7 @@ pub(crate) fn advance(
             + reference.reaction_slopes[i] * (state.speeds[i] - reference.speeds[i])
     });
     let inp = &controls.input;
-    let st = &mut state.transmission;
+    let st = &state.transmission;
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
     #[cfg(feature = "bitprobe")]
     let mut probe = input_probe(st, inp, mean, (inp.speeds[0] - inp.speeds[1]) * 0.5);
@@ -2223,8 +2304,41 @@ pub(crate) fn advance(
         #[cfg(feature = "bitprobe")]
         &mut probe,
     );
-    let (mut report, clutch_torque, steer_force) =
-        advance_rows(fp, tp, st, &controls, torque, warm);
+    let mechanical = prepare_rows(fp, tp, st, &controls, torque);
+    PreparedDrive {
+        mechanical,
+        controls,
+        power,
+        omega_pre,
+        mean,
+        ratio,
+        k,
+        #[cfg(feature = "bitprobe")]
+        probe,
+    }
+}
+
+pub(crate) fn finish_advance(
+    tp: &TransmissionParams,
+    state: &mut DriveState,
+    prepared: &PreparedDrive,
+    solved: &super::block::Solution,
+    h: f32,
+) -> TransmissionReport {
+    let PreparedDrive {
+        ref mechanical,
+        controls,
+        power,
+        omega_pre,
+        mean,
+        ratio,
+        k,
+        #[cfg(feature = "bitprobe")]
+        mut probe,
+    } = *prepared;
+    let inp = &controls.input;
+    let st = &mut state.transmission;
+    let (mut report, clutch_torque, steer_force) = finish_rows(st, &controls, mechanical, solved);
     report.power_available = power;
     #[cfg(feature = "bitprobe")]
     {
@@ -2278,12 +2392,34 @@ pub(crate) fn advance(
         report.bitprobe = probe;
     }
     #[cfg(not(feature = "bitprobe"))]
-    let _ = (omega_pre, clutch_torque, steer_force);
+    let _ = (
+        tp,
+        inp,
+        omega_pre,
+        mean,
+        ratio,
+        k,
+        clutch_torque,
+        steer_force,
+    );
     for (phase, speed) in state.phases.iter_mut().zip(state.speeds) {
         *phase += f64::from(speed * h);
     }
     state.speeds = report.next_speeds;
     report
+}
+
+pub(crate) fn advance(
+    fp: &DriveConstruction,
+    tp: &TransmissionParams,
+    state: &mut DriveState,
+    orders: &Orders,
+    warm: &mut WarmStart,
+    h: f32,
+) -> TransmissionReport {
+    let prepared = prepare_advance(fp, tp, state, orders, h);
+    let solved = prepared.mechanical.solve([0.0; 2], warm);
+    finish_advance(tp, state, &prepared, &solved, h)
 }
 
 #[cfg(test)]

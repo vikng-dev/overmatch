@@ -1,6 +1,7 @@
 //! Tick orders and impulse-weighted reporting around the one mechanical integrator.
 
 use super::*;
+use crate::track::drive::{DriveAxes, DriveTarget};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DriveState {
@@ -37,6 +38,8 @@ pub(crate) fn prepare_orders(
 /// over elapsed time; a tick is locked/held only if every substep was, and drives if any did.
 pub(crate) struct DriveTick {
     pub state: DriveState,
+    initial: DriveState,
+    contacts_started: bool,
     pub(crate) orders: Orders,
     pub(crate) warm: super::super::block::WarmStart,
     last: Option<TransmissionReport>,
@@ -68,8 +71,14 @@ impl DriveTick {
         input: &TransmissionInput,
     ) -> Self {
         let orders = prepare_orders(fp, tp, &mut state.transmission, input);
+        Self::from_orders(state, orders)
+    }
+
+    fn from_orders(state: DriveState, orders: Orders) -> Self {
         Self {
             state,
+            initial: state,
+            contacts_started: false,
             orders,
             warm: super::super::block::WarmStart::default(),
             last: None,
@@ -99,6 +108,10 @@ impl DriveTick {
 
     pub fn advance(&mut self, fp: &DriveConstruction, tp: &TransmissionParams, h: f32) {
         let report = super::advance(fp, tp, &mut self.state, &self.orders, &mut self.warm, h);
+        self.record(report, h);
+    }
+
+    fn record(&mut self, report: TransmissionReport, h: f32) {
         let dt = f64::from(h);
         self.elapsed += dt;
         self.steps += 1;
@@ -122,67 +135,83 @@ impl DriveTick {
                     + f64::from(report.next_speeds[i]))
                     * 0.5
                     * dt;
-                self.belt_work.travel_m[i] += travel;
                 self.belt_work.sprocket_work_j[i] += f64::from(report.forces[i]) * travel;
             }
         }
         self.last = Some(report);
     }
 
-    /// Contact impulses update the same scalar coordinates the next free step reads. Clutch
-    /// readout follows their final relative speed; a pre-contact stop no longer holds a moving
-    /// belt. The motor and contact rows retain Avian's substep splitting.
-    pub(crate) fn accept_contact_speeds(&mut self, tp: &TransmissionParams, speeds: [f32; 2]) {
-        if speeds == self.state.speeds {
-            return;
+    pub(crate) fn prepare_contact(
+        &mut self,
+        fp: &DriveConstruction,
+        tp: &TransmissionParams,
+        h: f32,
+        resting: bool,
+    ) -> crate::avian_ext::surface_motion::Coordinates {
+        if !self.contacts_started {
+            if resting {
+                // The sleeping trial is a prediction. A real wake replays that interval once.
+                let warm = std::mem::take(&mut self.warm);
+                *self = Self::from_orders(self.initial, self.orders);
+                self.warm = warm;
+            }
+            self.contacts_started = true;
         }
-        self.state.speeds = speeds;
-        let controls = self.orders.controls;
-        let st = &mut self.state.transmission;
-        let k = controls.dir * controls.ratio / tp.sprocket_radius;
-        let locked = !controls.clutch_open
-            && tp
-                .couplings
-                .iter()
-                .filter_map(|c| match c {
-                    Coupling::Clutch(output) if !output.inner(controls.input.steer) => {
-                        Some(*output)
-                    }
-                    _ => None, // Only closed drive outputs constrain the crank.
-                })
-                .all(|output| {
-                    let weights = output.weights();
-                    let shaft = f64::from(k)
-                        * (weights[0] * f64::from(speeds[0]) + weights[1] * f64::from(speeds[1]));
-                    // Resolution: two f32 roundings carry the block's crank and belt results to state.
-                    (f64::from(st.omega_e) - shaft).abs()
-                        <= 2.0
-                            * f64::from(f32::EPSILON)
-                            * (f64::from(st.omega_e).abs() + shaft.abs())
-                });
-        st.clutch = if controls.clutch_open {
-            ClutchState::Out
-        } else if locked {
-            ClutchState::In
-        } else {
-            ClutchState::Slip
-        };
-        self.locked &= locked;
-        for (held, speed) in self.held.iter_mut().zip(speeds) {
-            *held &= speed == 0.0;
-        }
-        self.brakes_slide |= (st.park || controls.service) && speeds != [0.0; 2];
-        let report = self
-            .last
-            .as_mut()
-            .expect("a contact exchange follows its substep's motor advance");
-        report.next_speeds = speeds;
-        report.locked = locked;
+        crate::avian_ext::surface_motion::Coordinates::drivetrain(super::prepare_advance(
+            fp,
+            tp,
+            &self.state,
+            &self.orders,
+            h,
+        ))
+    }
+
+    pub(crate) fn finish_contact(
+        &mut self,
+        tp: &TransmissionParams,
+        coordinates: &crate::avian_ext::surface_motion::Coordinates,
+        h: f32,
+    ) {
+        let report = coordinates.finish(tp, &mut self.state, h);
+        coordinates.remember(&mut self.warm);
+        self.record(report, h);
         #[cfg(feature = "bitprobe")]
         {
-            report.bitprobe.next_speeds = speeds;
-            report.bitprobe.locked = locked;
+            self.belt_work.solver_work_j += coordinates.work();
         }
+    }
+
+    /// The game's damage model: no sampled driving pass means no served task or sampled load.
+    /// Contact-only time still advances the constructed brake and clutch at their real capacity.
+    pub(crate) fn contact_only(
+        fp: &DriveConstruction,
+        tp: &TransmissionParams,
+        state: DriveState,
+        target: DriveTarget,
+        h: f32,
+    ) -> Self {
+        let mut supply = target.supply;
+        supply.task_rate = 0.0;
+        Self::new(
+            fp,
+            tp,
+            state,
+            &TransmissionInput {
+                supply,
+                intent: match target.intent {
+                    DriveIntent::Brake => DriveIntent::Brake,
+                    DriveIntent::Axes(_) => DriveIntent::Axes(DriveAxes::default()),
+                },
+                throttle: 0.0,
+                steer: 0.0,
+                side_commands: [0.0; 2],
+                speeds: state.speeds,
+                reactions: [0.0; 2],
+                reaction_slopes: [0.0; 2],
+                sensed: None,
+                dt: h,
+            },
+        )
     }
 
     pub fn report(&self, substeps: u32) -> TransmissionReport {

@@ -6,11 +6,12 @@
 //! THE READING. Avian's contact solver runs sequential impulses over substeps. Each substep warm
 //! starts every contact point with its accumulated impulse scaled by
 //! `SolverConfig::warm_start_coefficient` (`w`). Normal impulses accumulate in the biased and
-//! relaxing passes; friction accumulates only in the relaxing pass. After the substeps restitution
+//! relaxing passes; ordinary friction runs only in relaxation, finite-surface friction in both.
+//! After the substeps restitution
 //! may add one more normal increment. The momentum one substep moves through a point is its post-relax
 //! accumulated impulse `I_s` less the share of the previous one warm starting did not reapply,
-//! `I_s − (1 − w) I_{s−1}`. Finite-surface friction scales its own accumulator at warm start,
-//! so its post-relax accumulator is already the applied impulse. Restitution moves its increment.
+//! `I_s − (1 − w) I_{s−1}`. Tangents use [`crate::avian_ext::surface_motion::tangent_impulse`].
+//! Restitution moves its increment.
 //! [`ContactTransfers`] sums exactly that, from Avian's public solver state (`ConstraintGraph`):
 //! - before the substeps ([`SolverSystems::PreSubstep`]): one record per point of every constraint
 //!   with the point's warm-start impulse as `I_{−1}`;
@@ -22,8 +23,7 @@
 //! independently of [`StructureBody`], through [`ContactTransfers::solver_groups`]. The other side
 //! may be fixed ground or another moving body. `ContactPoint::normal_impulse` is not this reading:
 //! Avian adds the whole accumulated impulse into it on every solve call, twice per substep, and
-//! keeps the friction impulse only as the last substep's, in a basis it does not store. The
-//! finite-surface hook retains its accumulator convention; this reader owns the reporting.
+//! keeps the friction impulse only as the last substep's, in a basis it does not store.
 //!
 //! WHAT IT HOLDS. The last physics step's points, in Avian's constraint order, until the next step
 //! replaces them, with the step's length and a count of the steps summed. A reader retaining
@@ -719,11 +719,12 @@ fn add_substep(
                 let (normal_now, friction_now) = (point.normal_part.impulse, friction(point));
                 let (normal_before, friction_before) = last[slot];
                 let normal = normal_now - unapplied * normal_before;
-                let tangent = if constraint.surface_hook.is_some() {
-                    friction_now
-                } else {
-                    friction_now - unapplied * friction_before
-                };
+                let tangent = crate::avian_ext::surface_motion::tangent_impulse(
+                    constraint,
+                    slot,
+                    friction_before,
+                    unapplied,
+                );
                 points[slot].impulse +=
                     normal * constraint.normal + tangent.x * tangent1 + tangent.y * tangent2;
                 last[slot] = (normal_now, friction_now);
@@ -760,7 +761,7 @@ fn add_restitution(
     );
 }
 
-/// Prepared contact bindings precede the history snapshot, including custom warm-start semantics.
+/// Fix the order of ConstraintGraph writes and this geometry-only snapshot; either order works.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct PrepareReading;
 
@@ -1373,10 +1374,7 @@ mod tests {
     /// makes the reading disagree with the rigid body's momentum.
     #[test]
     fn finite_surface_readback_is_the_momentum_the_solver_moved() {
-        use avian3d::dynamics::solver::{
-            contact::SurfaceFrictionHook,
-            solver_body::{SolverBodies, SurfaceCoordinate, SurfaceSpeed},
-        };
+        use avian3d::dynamics::solver::solver_body::{SolverBodies, SurfaceCoordinate};
         #[derive(Component)]
         struct MovingSurface;
         fn bind(
@@ -1400,16 +1398,16 @@ mod tests {
                         index: 0,
                         direction: if side == 0 { -Vec3::Z } else { Vec3::Z },
                     });
-                    row.surface_hook =
-                        Some(SurfaceFrictionHook(crate::avian_ext::surface_motion::solve));
                     let body = bodies.get_mut(index).unwrap();
-                    if body.surface_speeds.is_empty() {
-                        // Fixture: one finite surface, initially moving at 1.5 m/s, inertia 500 kg.
-                        body.surface_speeds.push(SurfaceSpeed {
-                            velocity: 1.5,
-                            inverse_inertia: 1.0 / 500.0,
-                            work: 0.0,
-                        });
+                    if body.surface_scratch.is_none() {
+                        // Fixture: one surface, initially 1.5 m/s, scalar inertia 500 kg.
+                        crate::avian_ext::surface_motion::Coordinates::free(vec![
+                            crate::avian_ext::surface_motion::SurfaceSpeed {
+                                velocity: 1.5,
+                                inverse_inertia: 1.0 / 500.0,
+                            },
+                        ])
+                        .install(body);
                     }
                 }
             }

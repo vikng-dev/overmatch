@@ -37,7 +37,11 @@ pub(crate) struct Row {
 }
 
 impl Row {
-    pub(super) fn slip_tolerance(&self, velocity: &[f64]) -> f64 {
+    pub(crate) fn starts_sliding(&self, velocity: &[f64]) -> bool {
+        dot(&self.jacobian, velocity) != self.target
+    }
+
+    pub(crate) fn slip_tolerance(&self, velocity: &[f64]) -> f64 {
         // Resolution: coefficient magnitudes scale the unit-speed roundoff floor into row
         // units. Target and evaluation magnitudes cover cancellation without a rest-speed band.
         RESOLUTION
@@ -59,14 +63,14 @@ pub(crate) enum State {
     Upper,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct RowResult {
     pub impulse: f64,
     /// The row exhausted static capacity during this call, or began sliding.
     pub dynamic: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Solution {
     pub speeds: Vec<f64>,
     pub rows: Vec<RowResult>,
@@ -74,11 +78,260 @@ pub(crate) struct Solution {
     #[cfg(feature = "bitprobe")]
     pub assignments_tried: usize,
     assignment: Vec<State>,
+    multipliers: Vec<f64>,
+    equalities: Vec<usize>,
+    snap_basis: Vec<usize>,
+}
+
+/// Affine response while a bounded block stays on one KKT face.
+#[derive(Clone, Debug)]
+pub(crate) struct FaceResponse {
+    pub(crate) mobility: Vec<Vec<f64>>,
+    impulses: Vec<Vec<f64>>,
+    multipliers: Vec<Vec<f64>>,
+}
+
+impl Solution {
+    pub(crate) fn response(
+        &self,
+        speeds: &[Speed],
+        rows: &[Row],
+        limits: &[ImpulseLimit],
+    ) -> FaceResponse {
+        let interior: Vec<_> = (0..rows.len())
+            .filter(|&i| self.assignment[i] == State::Interior)
+            .collect();
+        let active: Vec<_> = (0..limits.len())
+            .filter(|&i| self.assignment[rows.len() + i] != State::Interior)
+            .collect();
+        let nf = interior.len();
+        let size = nf + active.len();
+        let mut response = FaceResponse {
+            mobility: Vec::new(),
+            impulses: Vec::new(),
+            multipliers: Vec::new(),
+        };
+        for column in 0..speeds.len() {
+            let mut matrix = vec![vec![0.0; size + 1]; size];
+            for (i, &ri) in interior.iter().enumerate() {
+                for (j, &rj) in interior.iter().enumerate() {
+                    matrix[i][j] = rows[ri]
+                        .jacobian
+                        .iter()
+                        .zip(&rows[rj].jacobian)
+                        .zip(speeds)
+                        .map(|((a, b), s)| a * b / s.inertia)
+                        .sum();
+                }
+                matrix[i][size] = -rows[ri].jacobian[column] / speeds[column].inertia;
+                for (j, &li) in active.iter().enumerate() {
+                    matrix[i][nf + j] = limits[li].coefficients[ri];
+                    matrix[nf + j][i] = limits[li].coefficients[ri];
+                }
+            }
+            let answer = eliminate_bordered(&mut matrix, nf)
+                .expect("the accepted KKT face has an independent response basis");
+            let velocity = speeds
+                .iter()
+                .enumerate()
+                .map(|(j, s)| {
+                    let free = if j == column { 1.0 } else { 0.0 };
+                    let response = (free
+                        + interior
+                            .iter()
+                            .zip(&answer)
+                            .map(|(&i, p)| rows[i].jacobian[j] * p)
+                            .sum::<f64>())
+                        / s.inertia;
+                    // Resolution: cancellation while projecting a held coordinate leaves f64 ulps.
+                    if response.abs() <= RESOLUTION / (s.inertia * speeds[column].inertia).sqrt() {
+                        0.0
+                    } else {
+                        response
+                    }
+                })
+                .collect();
+            let mut impulse = vec![0.0; rows.len()];
+            for (&i, &p) in interior.iter().zip(&answer) {
+                impulse[i] = p;
+            }
+            let mut multiplier = vec![0.0; limits.len()];
+            for (&i, &mu) in active.iter().zip(&answer[nf..]) {
+                multiplier[i] = mu;
+            }
+            response.mobility.push(velocity);
+            response.impulses.push(impulse);
+            response.multipliers.push(multiplier);
+        }
+        response
+    }
+}
+
+impl FaceResponse {
+    /// None means a bound, multiplier sign or equality basis changed: the active-set search
+    /// must select another face. Reuse is certified by the same KKT gate as the full solve.
+    pub(crate) fn apply(
+        &self,
+        base: &Solution,
+        rows: &[Row],
+        limits: &[ImpulseLimit],
+        impulse: &[f64],
+    ) -> Option<Solution> {
+        assert!(
+            rows.iter().all(|r| r.dynamic.is_none()),
+            "affine contact response holds one static/sliding regime fixed"
+        );
+        let mut next = base.clone();
+        for (column, &p) in impulse.iter().enumerate() {
+            for (v, a) in next.speeds.iter_mut().zip(&self.mobility[column]) {
+                *v += a * p;
+            }
+            for (q, a) in next.rows.iter_mut().zip(&self.impulses[column]) {
+                q.impulse += a * p;
+            }
+            for (mu, a) in next.multipliers.iter_mut().zip(&self.multipliers[column]) {
+                *mu += a * p;
+            }
+        }
+        let mut impulses: Vec<_> = next.rows.iter().map(|q| q.impulse).collect();
+        let bounds: Vec<_> = rows.iter().map(|r| r.bounds).collect();
+        if !check_face(
+            rows,
+            &bounds,
+            limits,
+            &next.assignment,
+            &next.speeds,
+            &mut impulses,
+            &next.multipliers,
+        ) {
+            return None;
+        }
+        if physical_equalities(rows, limits, &next.assignment, &next.multipliers) != base.equalities
+        {
+            return None;
+        }
+        for (row, p) in next.rows.iter_mut().zip(impulses) {
+            row.impulse = p;
+        }
+        snap(&mut next.speeds, rows, &next.snap_basis);
+        #[cfg(feature = "bitprobe")]
+        {
+            next.assignments_tried = 1;
+            ASSIGNMENT_WORK.with(|work| work.set(work.get() + 1));
+        }
+        Some(next)
+    }
+}
+
+fn physical_equalities(
+    rows: &[Row],
+    limits: &[ImpulseLimit],
+    states: &[State],
+    multipliers: &[f64],
+) -> Vec<usize> {
+    (0..rows.len())
+        .filter(|&i| {
+            states[i] == State::Interior
+                && limits
+                    .iter()
+                    .zip(multipliers)
+                    .map(|(limit, mu)| limit.coefficients[i] * mu)
+                    .sum::<f64>()
+                    == 0.0
+        })
+        .collect()
+}
+
+fn check_face(
+    rows: &[Row],
+    bounds: &[Bounds],
+    limits: &[ImpulseLimit],
+    states: &[State],
+    velocity: &[f64],
+    impulses: &mut [f64],
+    multipliers: &[f64],
+) -> bool {
+    assert!(
+        velocity
+            .iter()
+            .chain(impulses.iter())
+            .chain(multipliers)
+            .all(|v| v.is_finite()),
+        "a finite KKT face produces finite speeds, impulses and multipliers"
+    );
+    for (i, row) in rows.iter().enumerate() {
+        let bound = bounds[i];
+        let allowance = RESOLUTION * bound.lower.abs().max(bound.upper.abs());
+        let correction: f64 = limits
+            .iter()
+            .zip(multipliers)
+            .map(|(l, mu)| l.coefficients[i] * mu)
+            .sum();
+        let gradient = dot(&row.jacobian, velocity) - row.target + correction;
+        let tolerance = row.slip_tolerance(velocity) + RESOLUTION * correction.abs();
+        if impulses[i] < bound.lower - allowance
+            || impulses[i] > bound.upper + allowance
+            || match states[i] {
+                State::Interior => gradient.abs() > tolerance,
+                State::Lower => {
+                    (impulses[i] - bound.lower).abs() > allowance
+                        || (bound.lower != bound.upper && gradient < -tolerance)
+                }
+                State::Upper => {
+                    (impulses[i] - bound.upper).abs() > allowance
+                        || (bound.lower != bound.upper && gradient > tolerance)
+                }
+            }
+        {
+            return false;
+        }
+        impulses[i] = impulses[i].clamp(bound.lower, bound.upper);
+    }
+    for (j, limit) in limits.iter().enumerate() {
+        let value = dot(&limit.coefficients, impulses);
+        let tolerance = RESOLUTION
+            * (limit.bounds.lower.abs().max(limit.bounds.upper.abs())
+                + limit
+                    .coefficients
+                    .iter()
+                    .zip(impulses.iter())
+                    .map(|(c, p)| (c * p).abs())
+                    .sum::<f64>());
+        if value < limit.bounds.lower - tolerance || value > limit.bounds.upper + tolerance {
+            return false;
+        }
+        let active_bound = match states[rows.len() + j] {
+            State::Interior => None,
+            State::Lower => Some(limit.bounds.lower),
+            State::Upper => Some(limit.bounds.upper),
+        };
+        if let Some(bound) = active_bound {
+            if (value - bound).abs() > tolerance {
+                return false;
+            }
+            // Row residual allowances map to multiplier units through this normal's coefficients.
+            let allowance = (0..rows.len())
+                .filter(|&i| states[i] == State::Interior && limit.coefficients[i] != 0.0)
+                .map(|i| rows[i].slip_tolerance(velocity) / limit.coefficients[i].abs())
+                .reduce(f64::min)
+                .expect("an independent active normal has a free coefficient");
+            if limit.bounds.lower != limit.bounds.upper
+                && match states[rows.len() + j] {
+                    State::Lower => multipliers[j] > allowance,
+                    State::Upper => multipliers[j] < -allowance,
+                    State::Interior => unreachable!("an active limit has a face"),
+                }
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// The accepted KKT faces remain a valid search seed while row identities stay unchanged.
 /// Bounds and targets may move; each trial still checks feasibility and optimality afresh.
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct WarmStart {
     layout: Vec<(Vec<f64>, bool)>,
     limits: Vec<Vec<f64>>,
@@ -86,6 +339,10 @@ pub(crate) struct WarmStart {
 }
 
 impl WarmStart {
+    pub(crate) fn remember(&mut self, rows: &[Row], limits: &[ImpulseLimit], solved: &Solution) {
+        self.seed(rows, limits);
+        self.assignment.clone_from(&solved.assignment);
+    }
     fn seed(&mut self, rows: &[Row], limits: &[ImpulseLimit]) -> Vec<State> {
         let matches = self.layout.len() == rows.len()
             && self.limits.len() == limits.len()
@@ -205,7 +462,7 @@ pub(crate) fn solve_limited(
                     && sliding.upper <= row.bounds.upper,
                 "dynamic bounds are a finite ordered subset of static bounds"
             );
-            dynamic[i] = dot(&row.jacobian, &start) != row.target;
+            dynamic[i] = row.starts_sliding(&start);
         }
         bounds.push(if dynamic[i] {
             row.dynamic
@@ -390,72 +647,26 @@ impl Search<'_> {
             impulses[i] = p;
         }
         let mut velocity = velocity_for(&impulses);
-        let multipliers = &answer[nf..];
-        let mut snapped = Vec::new();
-        for i in 0..n {
-            let bound = self.bounds[i];
-            let allowance = RESOLUTION * bound.lower.abs().max(bound.upper.abs());
-            let correction: f64 = active
-                .iter()
-                .zip(multipliers)
-                .map(|(&j, mu)| self.limits[j].coefficients[i] * mu)
-                .sum();
-            let slip = dot(&self.rows[i].jacobian, &velocity) - self.rows[i].target;
-            let gradient = slip + correction;
-            let tolerance = self.rows[i].slip_tolerance(&velocity) + RESOLUTION * correction.abs();
-            if impulses[i] < bound.lower - allowance
-                || impulses[i] > bound.upper + allowance
-                || match states[i] {
-                    State::Interior => gradient.abs() > tolerance,
-                    State::Lower => bound.lower != bound.upper && gradient < -tolerance,
-                    State::Upper => bound.lower != bound.upper && gradient > tolerance,
-                }
-            {
-                return None;
-            }
-            impulses[i] = impulses[i].clamp(bound.lower, bound.upper);
-            if states[i] == State::Interior && correction == 0.0 {
-                snapped.push(i);
-            }
+        let mut multipliers = vec![0.0; self.limits.len()];
+        for (&j, &mu) in active.iter().zip(&answer[nf..]) {
+            multipliers[j] = mu;
         }
-        for (j, limit) in self.limits.iter().enumerate() {
-            let value = dot(&limit.coefficients, &impulses);
-            let tolerance = RESOLUTION
-                * (limit.bounds.lower.abs().max(limit.bounds.upper.abs())
-                    + limit
-                        .coefficients
-                        .iter()
-                        .zip(&impulses)
-                        .map(|(c, p)| (c * p).abs())
-                        .sum::<f64>());
-            if value < limit.bounds.lower - tolerance || value > limit.bounds.upper + tolerance {
-                return None;
-            }
-            if let Some(at) = active.iter().position(|&i| i == j) {
-                let mu = multipliers[at];
-                // Dividing a row residual allowance by this normal's coefficient gives
-                // multiplier units. Rescaling an aggregate must not change its sign test.
-                let allowance = interior
-                    .iter()
-                    .filter(|&&i| limit.coefficients[i] != 0.0)
-                    .map(|&i| self.rows[i].slip_tolerance(&velocity) / limit.coefficients[i].abs())
-                    .reduce(f64::min)
-                    .expect("an independent active normal has a free coefficient");
-                if limit.bounds.lower != limit.bounds.upper
-                    && match states[n + j] {
-                        State::Lower => mu > allowance,
-                        State::Upper => mu < -allowance,
-                        State::Interior => unreachable!("an active limit has a face"),
-                    }
-                {
-                    return None;
-                }
-            }
+        if !check_face(
+            self.rows,
+            self.bounds,
+            self.limits,
+            states,
+            &velocity,
+            &mut impulses,
+            &multipliers,
+        ) {
+            return None;
         }
+        let snapped = physical_equalities(self.rows, self.limits, states, &multipliers);
         // Only zero-multiplier physical equalities can be snapped. Aggregate-constrained
         // interior rows may slide; their KKT equality includes the limit's shadow price.
         let mut independent = Vec::new();
-        for i in snapped {
+        for &i in &snapped {
             independent.push(i);
             let mut gram: Vec<Vec<f64>> = independent
                 .iter()
@@ -489,6 +700,9 @@ impl Search<'_> {
             #[cfg(feature = "bitprobe")]
             assignments_tried: 0,
             assignment: states.to_vec(),
+            multipliers,
+            equalities: snapped,
+            snap_basis: independent,
             speeds: velocity,
             rows: impulses
                 .into_iter()

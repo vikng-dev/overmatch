@@ -10,7 +10,7 @@ Numbers are MEASURED on 2026-11-08 unless labelled DERIVED or dated otherwise.
 | The belt meets | Channel | In the solver? | Owner |
 |---|---|---|---|
 | ground, standing construction, map blocks, another hull | sampled support | no | `track::forces` |
-| a wall or a step past the belt's travel | outer-face stop and side plates | yes, as solver contacts moving at belt speed | `track::bump_stop`, `track::stop_contacts` |
+| a wall or a step past the belt's travel | outer-face stop and side plates | yes, with finite-inertia surface coordinates | `track::bump_stop`, `track::stop_contacts` |
 | loose pieces | one soft run per side on `Layer::TrackBelt` | yes, as compliant contacts | `track::soft_run` |
 
 **The sampled support.** Each side has 48 stations round the closed loop and three points across
@@ -22,10 +22,66 @@ strain carries the grip. A solid takes the whole opposite reaction: a fixed cons
 load reading, a dynamic body as an impulse at the contact.
 
 **The stop.** Past the wheels' travel a full-width prism per side on `Layer::Vehicle` is the belt's
-hard limit, and thin slices at the shoe faces meet bodies laterally. Each surface moves at belt
-speed in the solver (`stop_contacts`), so friction against a wall lifts the hull at μ times the
-forward push wherever the belt wraps an end wheel. Solver friction returns to the transmission
-through one reader of the contact transfers, the runs' with it.
+hard limit, and thin slices at the shoe faces meet bodies laterally. Each surface binds its
+owner's finite-inertia belt coordinate (`stop_contacts`). The contact minimizes friction work on
+the Coulomb disk after eliminating the bounded drivetrain rows: a brake holding within capacity
+has zero mobility, a locked clutch reflects crank inertia, and sampled reaction slopes augment
+belt inertia. Each impulse changes both rigid bodies and the owner's mechanical solution in the
+same substep. Readback commits that solution before the next substep; contact transfers supply
+traction history to the Driver's ledger, never a second belt load. Friction against a wall can
+lift the hull wherever the belt wraps an end wheel.
+
+Finite-surface friction runs after both normal passes, before position integration and during
+relaxation, sharing one accumulated impulse and one mechanical budget. A held speed after
+integration alone still permits travel. The mechanical response is affine on each KKT face;
+cached responses pass the full solve's feasibility and complementarity gate, and a changed face
+requires a new active-set solve.
+
+The prescribed conveyor with delayed billing was rejected: it supplied unlimited momentum while
+its belt had finite inertia. Bare belt inertia followed by a separate brake solve was also
+rejected: it let the hull creep while the brake erased only the belt's motion. Static-to-sliding
+capacity changes belong to the joint solve; a numerical convergence limit refuses an unconverged
+answer rather than changing the physical law.
+
+**Parked-slab observation (MEASURED 2026-11-19).** The shipped tank stands awake on a static
+`Debris` slab, with no sampled support, at 64 Hz. These are observations of the suspension and
+contact composition, not regression targets. Mean speed is along the slope; travel is the hull
+origin's displacement over 191 tick intervals (2.984375 s), sampled from 1.015625 to 4 s.
+The baseline is `1c9ca756`; the finite constrained response includes friction before integration.
+
+| substeps | slope | baseline mean m/s | baseline travel m | constrained mean m/s | constrained travel m |
+|---|---|---|---|---|---|
+| 3 | 15° | 0.07870076 | 0.23728697 | -0.00072019 | 0.00025751 |
+| 3 | 30° | 0.15339418 | 0.46026197 | 0.00006440 | 0.00420185 |
+| 6 | 15° | 0.03898656 | 0.11855792 | -0.00069655 | 0.00023993 |
+| 6 | 30° | 0.07613634 | 0.22907600 | -0.00049954 | 0.00092506 |
+| 12 | 15° | 0.01919072 | 0.05933666 | -0.00065957 | 0.00022325 |
+| 12 | 30° | 0.03777212 | 0.11470390 | -0.00052659 | 0.00050069 |
+
+Over 5.015625–8 s, the constrained composition's means at 3/6/12 substeps are
+-0.00000915/-0.00000496/-0.00000465 m/s at 15°, with origin travel
+0.00002089/0.00000533/0.00000335 m; at 30° they are
+0.00062495/0.00002645/0.00000857 m/s, with travel 0.00454067/0.00106578/0.00032937 m.
+The belts remain at zero with no brake-sliding ticks. Origin and centre-of-mass travel differ
+during suspension settling: at six substeps the early COM travel is -0.00201114 m at 15° and
+-0.00092265 m at 30°. The separate angularly locked rigid-hull witness isolates the tangential
+holding invariant from that settling.
+
+The rigid witness uses a sphere with locked rotation to isolate one translational contact,
+with mass derived from the brake rating and grip above either slope's demand. It clears cached
+friction every substep while retaining Avian's normal warm start. At 1/3/6/12 substeps and
+15°/30°, peak speed is at most 3.11e-9 m/s and three-second travel at most 5.73e-6 m
+(MEASURED); the allowances derive from f32 velocity-increment and world-pose roundoff. Running
+friction only after integration fails the travel invariant even when the final speed is held.
+
+**Contact cost (MEASURED 2026-11-19).** An isolated local run installs two compute workers,
+then pulls one shipped tank on solver-only slab support for two seconds under the `edit` test
+profile. Normal grip: the biased contact pass averages 417.39 µs/tick and Relax averages
+669.05 µs/tick (median 670.75, peak 1000.00). With fixture friction 0.01 to exercise sliding:
+521.77 µs/tick and 769.30 µs/tick (median 754.04, peak 1000.96). Respectively 614/1821 and
+1616/1809 final-substep surface points lie on the Coulomb boundary. These price the whole contact
+passes, including normal rows; they are not a population scaling measurement or a hosted release
+build measurement.
 
 **The soft run.** Per side, one convex collider: the rest belt's outer outline across the shoe's
 measured faces, on `Layer::TrackBelt`, which meets only `Layer::Debris`. It is read as links of the
@@ -189,10 +245,8 @@ Known differences between the channels, none tuned:
     and a solid's face wholly past it drops out of the clipped envelope
     (`world_contact::convex::clip_faces`) rather than saturate: a slice bears that matter at any
     depth, and other matter deeper in the belt than the reach.
-  - *The read-back* (#353). The hook moves each surface at belt speed, the solver takes that
-    friction against the hull's mass alone, and the transmission reads it back a tick late with no
-    slope (`stop_contacts::reactions`, `sim::feel_tick`). Any opposed rigid pair that remains gives
-    that friction an unbounded limit, and the belt speed runs away and drags the hull.
+  The late read-back (#353) is resolved by the finite-inertia exchange described above. The
+  rejected conveyor and its delayed reaction remain historical explanations of those measurements.
 - **The law within a step.** A contact's shares and the points that bear are read once, at the
   narrow phase, so its stiffness is exact for a common compression of its links, not for one piece
   retreating alone. The points split the force by `overlap + rest`, so the centre of pressure and

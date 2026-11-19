@@ -109,7 +109,7 @@ pub struct DriveSignal {
 
 /// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
 /// clutch regime, park lever and reversal pause). Server-authoritative, advanced only
-/// where the body is dynamic through [`advance_drivetrains`], and
+/// where the body is dynamic through [`collect_surface_speeds`], and
 /// replicated as one atomic snapshot to the tank's OWNER only; every other listener reads the
 /// crank through [`EngineRpm`]. The determinism trace hashes every field of the exhaustive
 /// projection (`transmission::transmission_state_projection`) in stable order, with raw bits for
@@ -246,17 +246,34 @@ pub(crate) struct DrivetrainStep {
     warm: super::block::WarmStart,
 }
 
-enum PendingDrive {
+pub(crate) enum PendingDrive {
     Awake(DriveTick),
     Resting {
         signal: DriveSignal,
         tick: DriveTick,
     },
     /// No driving pass sampled this owner: contacts still exchange momentum in the current tick.
-    ContactOnly {
-        speeds: [f32; 2],
-        phases: [f64; 2],
-    },
+    ContactOnly(DriveTick),
+}
+
+impl PendingDrive {
+    #[cfg(test)]
+    pub(crate) fn tick(&self) -> &DriveTick {
+        match self {
+            Self::Awake(tick) | Self::Resting { tick, .. } | Self::ContactOnly(tick) => tick,
+        }
+    }
+    pub(crate) fn tick_mut(&mut self) -> &mut DriveTick {
+        match self {
+            Self::Awake(tick) | Self::Resting { tick, .. } | Self::ContactOnly(tick) => tick,
+        }
+    }
+    #[cfg(feature = "dev_ui")]
+    pub(crate) fn into_tick(self) -> DriveTick {
+        match self {
+            Self::Awake(tick) | Self::Resting { tick, .. } | Self::ContactOnly(tick) => tick,
+        }
+    }
 }
 
 /// Each collider some tank's last driving pass sampled as support, with the tanks it carries.
@@ -622,6 +639,7 @@ pub fn sim_plugin(app: &mut App) {
 /// The free step reads only owner-local state. Avian's passes precede/follow it serially;
 /// tanks within the step are independent and run on the compute pool.
 fn drivetrain_physics_plugin(app: &mut App) {
+    crate::avian_ext::surface_motion::register();
     app.add_systems(
         PhysicsSchedule,
         prepare_belt_surfaces
@@ -642,10 +660,8 @@ fn drivetrain_physics_plugin(app: &mut App) {
     );
     app.add_systems(
         SubstepSchedule,
-        // Finite contact exchanges precede the bounded motor/brake solve. Ending on the
-        // mechanical rows lets a holding brake finish at rest without discarding any impulse.
-        (collect_surface_speeds, advance_drivetrains)
-            .chain()
+        // Each owner's bounded mechanical rows and contacts share one interval and impulse budget.
+        collect_surface_speeds
             .after(SubstepSolverSystems::Relax)
             .before(avian3d::dynamics::solver::xpbd::XpbdSolverSystems::SolveConstraints),
     );
@@ -885,8 +901,7 @@ pub(crate) fn belt_reactions(
 }
 
 /// The Driver feels the tick ([`super::driver`]) with the belts at `belts` (m/s, `[left, right]`),
-/// with solver traction as history for the ledger. Solver impulses have already reached the
-/// finite belts in their own contact step; only sampled forces become loads here.
+/// with solver traction as history for the ledger. Only sampled forces become loads here.
 pub(crate) fn feel_tick(
     sense: &mut super::driver::DriverSense,
     reports: &[SideReport; 2],
@@ -927,8 +942,8 @@ pub(crate) struct BeltRig<'a> {
     pub elements: &'a mut TrackGripElements,
     pub transmission: TransmissionState,
     pub sense: &'a mut super::driver::DriverSense,
-    /// Last physics step's traction and grip for the Driver's ledger; no momentum is queued
-    /// from this history. None means that side had no solver contact.
+    /// Last physics step's traction and grip for the Driver's ledger.
+    /// None means that side had no solver contact.
     pub hard_reactions: [Option<super::stop_contacts::HardReaction>; 2],
 }
 
@@ -1266,162 +1281,160 @@ fn wake_driven_tanks(
     );
 }
 
-/// A wake after the driving pass has no prepared awake tick: it takes the next tick's sample.
-/// A sleeping trial never advances again, even if its island wakes during physics.
-fn advance_drivetrains(
-    time: Res<Time<Substeps>>,
-    gear: Option<Res<TrackGear>>,
-    mut tanks: Query<(&RigidBody, &mut DrivetrainStep), With<Tank>>,
-) {
-    tanks.par_iter_mut().for_each(|(body, mut step)| {
-        if *body == RigidBody::Dynamic
-            && let Some(PendingDrive::Awake(tick)) = &mut step.pending
-        {
-            let gear = gear
-                .as_deref()
-                .expect("a prepared drivetrain has admitted running gear");
-            tick.advance(&gear.construction, &gear.trans, time.delta_secs());
-        }
-    });
-}
-
-/// Prepare owner-local scalar scratch before warm start, from the current mechanical state.
+/// Only active tank owners prepare scratch; every BeltFace owner carries TrackDrive from spawn.
+/// Evaluation is parallel by owner. Scratch commits before any warm-start contact can read it.
 fn prepare_surface_speeds(
-    tanks: Query<(&RigidBody, Option<&DrivetrainStep>, &TrackDrive)>,
+    mut tanks: Query<
+        (
+            &avian3d::dynamics::solver::solver_body::SolverBodyIndex,
+            &RigidBody,
+            Option<&mut DrivetrainStep>,
+            &TrackDrive,
+            Option<&TankTransmission>,
+            Option<&TankVolumes>,
+            Option<&TankCapabilities>,
+            Option<&ParsedTankCommand>,
+        ),
+        With<Tank>,
+    >,
     gear: Option<Res<TrackGear>>,
+    time: Res<Time<Substeps>>,
+    volumes: Query<VolumeFacets>,
     mut bodies: ResMut<avian3d::dynamics::solver::solver_body::SolverBodies>,
+    mut prepared: Local<
+        Parallel<
+            Vec<(
+                avian3d::dynamics::solver::solver_body::SolverBodyIndex,
+                crate::avian_ext::surface_motion::Coordinates,
+            )>,
+        >,
+    >,
+    mut ready: Local<
+        Vec<(
+            avian3d::dynamics::solver::solver_body::SolverBodyIndex,
+            crate::avian_ext::surface_motion::Coordinates,
+        )>,
+    >,
 ) {
-    let speeds = |body| {
-        let (body, step, drive) = tanks
-            .get(body)
-            .expect("a belt face has its body's belt state");
-        if !body.is_dynamic() {
-            return drive.sides.map(|s| s.speed); // A replica consumes streamed belts, with no local integrator.
-        }
-        let step = step.expect("a dynamic belt face has its spawn-built drivetrain");
-        match &step.pending {
-            Some(PendingDrive::Awake(tick) | PendingDrive::Resting { tick, .. }) => {
-                tick.state.speeds
-            }
-            Some(PendingDrive::ContactOnly { speeds, .. }) => *speeds,
-            None => drive.sides.map(|s| s.speed), // Stopped gameplay or wake after sampling: no prepared tick.
-        }
-    };
-    use avian3d::dynamics::solver::solver_body::{SolverBodyIndex, SurfaceSpeed};
-    use bevy::tasks::{ComputeTaskPool, ParallelSlice};
-    let owners: Vec<_> = bodies.entities().iter().copied().enumerate().collect();
-    let prepared = owners.par_splat_map(ComputeTaskPool::get(), None, |_, batch| {
-        batch
-            .iter()
-            .filter_map(|&(index, owner)| {
-                let Ok((body, _, _)) = tanks.get(owner) else {
-                    return None;
-                }; // Ordinary rigid body.
-                let inverse = if body.is_dynamic() {
-                    1.0 / gear
-                        .as_deref()
-                        .expect("a dynamic belt has admitted running gear")
-                        .construction
-                        .belt_inertia
-                } else {
-                    0.0
-                }; // A replica's surface is prescribed by its authority.
-                let state = speeds(owner).map(|velocity| SurfaceSpeed {
-                    velocity,
-                    inverse_inertia: inverse,
-                    work: 0.0,
+    if tanks.is_empty() {
+        return;
+    } // No active tank: no dispatch, allocation or world-body scan.
+    let h = time.delta_secs();
+    tanks.par_iter_mut().for_each(
+        |(index, body, step, drive, transmission, tank, caps, command)| {
+            let coordinates = if body.is_dynamic() {
+                let mut step =
+                    step.expect("a dynamic belt owner carries its spawn-built drivetrain");
+                let transmission = transmission
+                    .expect("a dynamic belt owner carries its spawn-built transmission");
+                let gear = gear
+                    .as_deref()
+                    .expect("an admitted dynamic tank has running gear");
+                let pending = step.pending.get_or_insert_with(|| {
+                    PendingDrive::ContactOnly(DriveTick::contact_only(
+                        &gear.construction,
+                        &gear.trans,
+                        DriveState {
+                            transmission: transmission.0,
+                            speeds: drive.sides.map(|s| s.speed),
+                            phases: drive.sides.map(|s| s.phase),
+                        },
+                        drive_target(
+                            command.expect("a dynamic tank's command is parsed at spawn"),
+                            tank,
+                            caps,
+                            &volumes,
+                        ),
+                        h,
+                    ))
                 });
-                Some((SolverBodyIndex(index as u32), state))
-            })
-            .collect::<Vec<_>>()
-    });
-    // Solver state becomes visible atomically before warm start; each owner was evaluated alone.
-    for (index, state) in prepared.into_iter().flatten() {
-        bodies
-            .get_mut(index)
-            .expect("the solver body's index survives its substep")
-            .surface_speeds = state.into();
+                let resting = matches!(pending, PendingDrive::Resting { .. });
+                pending
+                    .tick_mut()
+                    .prepare_contact(&gear.construction, &gear.trans, h, resting)
+            } else {
+                // A replica consumes streamed belt speeds, with no local mechanical integration.
+                crate::avian_ext::surface_motion::belt_coordinates(
+                    drive.sides.map(|s| s.speed),
+                    0.0,
+                )
+            };
+            prepared.scope(|values| values.push((*index, coordinates)));
+        },
+    );
+    prepared.drain_into(&mut ready);
+    for (index, coordinates) in ready.drain(..) {
+        coordinates.install(
+            bodies
+                .get_mut(index)
+                .expect("an active tank's solver index survives its substep"),
+        );
     }
 }
 
-/// Friction has already exchanged momentum with these solver coordinates. Copy each owner's
-/// result before the next motor step, with no impulse queued for a later driving pass.
+/// Readback and mechanical publication are one owner-local pass after contact relaxation.
 fn collect_surface_speeds(
-    bodies: Res<avian3d::dynamics::solver::solver_body::SolverBodies>,
+    mut bodies: ResMut<avian3d::dynamics::solver::solver_body::SolverBodies>,
     gear: Option<Res<TrackGear>>,
     time: Res<Time<Substeps>>,
-    mut tanks: Query<(
-        &RigidBody,
-        &avian3d::dynamics::solver::solver_body::SolverBodyIndex,
-        &mut DrivetrainStep,
-        &TrackDrive,
-    )>,
+    mut tanks: Query<
+        (
+            &RigidBody,
+            &avian3d::dynamics::solver::solver_body::SolverBodyIndex,
+            &mut DrivetrainStep,
+        ),
+        With<Tank>,
+    >,
+    mut settled: Local<
+        Parallel<
+            Vec<(
+                avian3d::dynamics::solver::solver_body::SolverBodyIndex,
+                crate::avian_ext::surface_motion::Coordinates,
+            )>,
+        >,
+    >,
+    mut ready: Local<
+        Vec<(
+            avian3d::dynamics::solver::solver_body::SolverBodyIndex,
+            crate::avian_ext::surface_motion::Coordinates,
+        )>,
+    >,
 ) {
-    let h = time.delta_secs();
-    tanks
-        .par_iter_mut()
-        .for_each(|(body, index, mut step, drive)| {
-            if !body.is_dynamic() {
-                return;
-            } // Replicas consume streamed belt state.
-            let body = bodies
+    if tanks.is_empty() {
+        return;
+    } // No active tank has mechanical work to finish.
+    tanks.par_iter_mut().for_each(|(body, index, mut step)| {
+        if !body.is_dynamic() {
+            return;
+        } // Replicas consume streamed belt state.
+        let tick = step
+            .pending
+            .as_mut()
+            .expect("surface preparation creates this interval's mechanical state")
+            .tick_mut();
+        if let Some(coordinates) = crate::avian_ext::surface_motion::read_back(
+            bodies
                 .get(*index)
-                .expect("an active body's solver index addresses its state");
-            assert_eq!(
-                body.surface_speeds.len(),
-                2,
-                "each active belt owner prepares both scalar coordinates before warm start"
-            );
-            let speeds = [
-                body.surface_speeds[0].velocity,
-                body.surface_speeds[1].velocity,
-            ];
-            let resting = matches!(&step.pending, Some(PendingDrive::Resting { .. }));
-            match &mut step.pending {
-                Some(PendingDrive::Awake(tick) | PendingDrive::Resting { tick, .. }) => {
-                    if resting {
-                        // The accepted trial advanced at rest. A late wake can move its belts only
-                        // during the real contact substeps; those intervals still advance phase.
-                        for (phase, speed) in tick.state.phases.iter_mut().zip(tick.state.speeds) {
-                            *phase += f64::from(speed * h);
-                        }
-                        tick.accept_contact_speeds(
-                            &gear
-                                .as_deref()
-                                .expect("a prepared drivetrain has running gear")
-                                .trans,
-                            speeds,
-                        );
-                    } else {
-                        // The upcoming motor solve consumes this contact result, with its
-                        // bounded clutch, steering and brake rows still to decide the verdict.
-                        tick.state.speeds = speeds;
-                    }
-                    #[cfg(feature = "bitprobe")]
-                    {
-                        tick.belt_work.solver_work_j +=
-                            body.surface_speeds.iter().map(|s| s.work).sum::<f64>();
-                    }
-                }
-                Some(PendingDrive::ContactOnly {
-                    speeds: before,
-                    phases,
-                }) => {
-                    for (phase, speed) in phases.iter_mut().zip(*before) {
-                        *phase += f64::from(speed * h);
-                    }
-                    *before = speeds;
-                }
-                None => {
-                    // Stopped gameplay, or an island woke after sampling. The next tick samples
-                    // the motor; the current contact-only exchange still commits exactly once.
-                    let phases = drive
-                        .sides
-                        .map(|side| side.phase + f64::from(side.speed * h));
-                    step.pending = Some(PendingDrive::ContactOnly { speeds, phases });
-                }
-            }
-        });
+                .expect("an active tank's solver index addresses its state"),
+            tick,
+            &gear
+                .as_deref()
+                .expect("a dynamic tank has running gear")
+                .trans,
+            time.delta_secs(),
+        ) {
+            settled.scope(|values| values.push((*index, coordinates)));
+        }
+    });
+    // Owner-local results become visible before the next solver phase; indices are disjoint.
+    settled.drain_into(&mut ready);
+    for (index, coordinates) in ready.drain(..) {
+        coordinates.install(
+            bodies
+                .get_mut(index)
+                .expect("a tank's solver index survives readback"),
+        );
+    }
 }
 
 /// Avian 0.8.0's PostSubstep is after the whole substep loop, before island sleeping.
@@ -1473,22 +1486,10 @@ fn commit_drivetrains(
                 return; // Replicas consume the server stream; any prepared tick is discarded.
             }
             let Some(prepared) = prepared else {
-                return; // Gameplay is stopped, or an island woke after contact sampling.
+                return; // No substep ran for this tank, and no sleeping trial was prepared.
             };
             let (tick, sampled) = match prepared {
-                PendingDrive::ContactOnly { speeds, phases } => {
-                    drive.set_if_neq(TrackDrive {
-                        sides: [0, 1].map(|i| TrackDriveSide {
-                            speed: speeds[i],
-                            phase: phases[i],
-                        }),
-                    });
-                    if speeds != [0.0; 2] {
-                        last.at_rest = false;
-                        timer.0 = 0.0;
-                    }
-                    return;
-                }
+                PendingDrive::ContactOnly(tick) => (tick, false),
                 PendingDrive::Awake(tick) => (tick, true),
                 PendingDrive::Resting {
                     signal: staged,
@@ -1503,10 +1504,10 @@ fn commit_drivetrains(
             let report = tick.report(substeps.0);
             if sampled {
                 sense.drove(&report);
-                last.at_rest &= report.held == [true; 2] && !report.brakes_slide;
-                if !last.at_rest {
-                    timer.0 = 0.0;
-                }
+            }
+            last.at_rest &= report.held == [true; 2] && !report.brakes_slide;
+            if !last.at_rest {
+                timer.0 = 0.0;
             }
             drive.set_if_neq(TrackDrive {
                 sides: [0, 1].map(|i| TrackDriveSide {
@@ -1831,6 +1832,24 @@ pub(crate) mod cost_probe;
 mod tests {
     use super::*;
 
+    // The direct force-adapter fixture has no contact loop; it advances the same mechanical law.
+    fn advance_drivetrains(
+        time: Res<Time<Substeps>>,
+        gear: Option<Res<TrackGear>>,
+        mut tanks: Query<(&RigidBody, &mut DrivetrainStep), With<Tank>>,
+    ) {
+        tanks.par_iter_mut().for_each(|(body, mut step)| {
+            if *body == RigidBody::Dynamic
+                && let Some(PendingDrive::Awake(tick)) = &mut step.pending
+            {
+                let gear = gear
+                    .as_deref()
+                    .expect("a prepared drivetrain has admitted running gear");
+                tick.advance(&gear.construction, &gear.trans, time.delta_secs());
+            }
+        });
+    }
+
     #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
     struct DriveTest;
     #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
@@ -1962,7 +1981,8 @@ mod tests {
         root: Entity,
         before: DriveState,
         steps: Vec<DriveState>,
-        contacts: Vec<DriveState>,
+        impulses: Vec<[f64; 2]>,
+        contact_moved: bool,
     }
     fn observe_substep(
         observed: Res<SubstepObservation>,
@@ -1984,8 +2004,8 @@ mod tests {
         };
         let prepared = bodies.get(*indices.get(observed.root).unwrap()).unwrap();
         assert_eq!(
-            prepared
-                .surface_speeds
+            crate::avian_ext::surface_motion::surface(prepared)
+                .initial
                 .iter()
                 .map(|s| s.velocity)
                 .collect::<Vec<_>>(),
@@ -2006,7 +2026,7 @@ mod tests {
                 continue;
             };
             assert!(
-                constraint.surface_hook.is_some(),
+                constraint.surface_coordinates.iter().any(Option::is_some),
                 "a moving face installs finite-inertia friction"
             );
             let coordinate = constraint.surface_coordinates[usize::from(sign > 0.0)]
@@ -2030,34 +2050,49 @@ mod tests {
         );
     }
 
-    fn observe_motor_step(mut observed: ResMut<SubstepObservation>, tanks: Query<&DrivetrainStep>) {
-        let Some(PendingDrive::Awake(tick)) = &tanks.get(observed.root).unwrap().pending else {
-            panic!("the motor advance retains its owner's prepared tick")
-        };
-        observed.steps.push(tick.state);
-    }
-
     fn observe_surface_exchange(
         mut observed: ResMut<SubstepObservation>,
-        tanks: Query<&DrivetrainStep>,
+        tanks: Query<(
+            &DrivetrainStep,
+            &avian3d::dynamics::solver::solver_body::SolverBodyIndex,
+        )>,
+        bodies: Res<avian3d::dynamics::solver::solver_body::SolverBodies>,
     ) {
-        let Some(PendingDrive::Awake(tick)) = &tanks.get(observed.root).unwrap().pending else {
-            panic!("the contact exchange retains the prepared motor tick")
-        };
-        observed.contacts.push(tick.state);
+        let (pending, index) = tanks.get(observed.root).unwrap();
+        let tick = pending
+            .pending
+            .as_ref()
+            .expect("contact readback retains its prepared tick")
+            .tick();
+        let coordinates = crate::avian_ext::surface_motion::surface(bodies.get(*index).unwrap());
+        assert_eq!(
+            tick.state.speeds.map(f32::to_bits),
+            coordinates.speeds().map(f32::to_bits),
+            "the next drivetrain interval must receive the solver's speeds, with side order intact"
+        );
+        let free = coordinates
+            .prepared
+            .as_ref()
+            .unwrap()
+            .mechanical
+            .solve([0.0; 2], &mut super::super::block::WarmStart::default());
+        observed.contact_moved |=
+            tick.state.speeds[0].to_bits() != (free.speeds[1] as f32).to_bits();
+        observed.steps.push(tick.state);
+        observed.impulses.push(coordinates.contact_impulses());
     }
 
     /// A wake without a driving pass still exchanges belt momentum, with one public commit.
     /// Readers of replicated belt phase rely on travel continuing during that contact-only tick.
     #[test]
     fn an_unsampled_contact_exchange_publishes_only_after_the_loop() {
-        use avian3d::dynamics::solver::solver_body::{SolverBodies, SolverBodyIndex, SurfaceSpeed};
+        use avian3d::dynamics::solver::solver_body::{SolverBodies, SolverBodyIndex};
         use bevy::ecs::system::RunSystemOnce;
         let (mut app, _) = adapter_app();
         let root = fixture_tank(&mut app, Vec3::Y * 100.0); // Fixture: no sampled ground.
         app.update();
         app.update();
-        // Fixture: independent belt speeds and nonzero travel origins before the exchange.
+        // Fixture: independent belt speeds and nonzero travel origins, with the park released.
         let before = TrackDrive {
             sides: [
                 TrackDriveSide {
@@ -2070,52 +2105,57 @@ mod tests {
                 },
             ],
         };
-        app.world_mut().entity_mut(root).insert(before);
-        let transmission = app.world().get::<TankTransmission>(root).unwrap().0;
+        let mut transmission = app.world().get::<TankTransmission>(root).unwrap().0;
+        transmission.park = false;
+        app.world_mut()
+            .entity_mut(root)
+            .insert((before, TankTransmission(transmission)));
+        app.world_mut().get_mut::<LastPass>(root).unwrap().at_rest = true;
+        app.world_mut().get_mut::<SleepTimer>(root).unwrap().0 = 1.0;
         let index = *app.world().get::<SolverBodyIndex>(root).unwrap();
-        let speeds = [1.0, -2.0]; // Fixture: the already-solved contact output, m/s.
-        app.world_mut()
-            .resource_mut::<SolverBodies>()
-            .get_mut(index)
-            .unwrap()
-            .surface_speeds = speeds
-            .into_iter()
-            .map(|velocity| SurfaceSpeed {
-                velocity,
-                inverse_inertia: 1.0,
-                work: 0.0,
-            })
-            .collect();
-        assert!(
-            app.world()
-                .get::<DrivetrainStep>(root)
-                .unwrap()
-                .pending
-                .is_none()
-        );
         let h = app.world().resource::<Time<Substeps>>().delta_secs();
-        app.world_mut()
-            .run_system_once(collect_surface_speeds)
-            .unwrap();
-        assert_eq!(
-            *app.world().get::<TrackDrive>(root).unwrap(),
-            before,
-            "solver scratch must not publish mid-loop"
-        );
-        app.world_mut().run_schedule(DriveCommitTest);
-        let after = app.world().get::<TrackDrive>(root).unwrap();
-        assert_eq!(after.sides.map(|side| side.speed), speeds);
-        for (was, now) in before.sides.iter().zip(after.sides) {
-            let travel = f64::from(was.speed) * f64::from(h);
-            // Resolution: one f32 travel product is carried into the f64 phase accumulator.
-            assert!(
-                ((now.phase - was.phase) - travel).abs() <= f64::from(f32::EPSILON) * travel.abs()
+        let mut expected_phases = before.sides.map(|s| s.phase);
+        let mut previous = before.sides.map(|s| s.speed);
+        let mut final_speeds = previous;
+        for impulses in [[400.0, -300.0], [-800.0, 700.0]] {
+            // Fixture: two distinct contact exchanges, N s.
+            app.world_mut()
+                .run_system_once(prepare_surface_speeds)
+                .unwrap();
+            {
+                let mut bodies = app.world_mut().resource_mut::<SolverBodies>();
+                crate::avian_ext::surface_motion::surface_mut(bodies.get_mut(index).unwrap())
+                    .add_impulses(impulses);
+                final_speeds =
+                    crate::avian_ext::surface_motion::solved_speeds(bodies.get(index).unwrap());
+            }
+            for (phase, speed) in expected_phases.iter_mut().zip(previous) {
+                *phase += f64::from(speed * h);
+            }
+            previous = final_speeds;
+            app.world_mut()
+                .run_system_once(collect_surface_speeds)
+                .unwrap();
+            assert_eq!(
+                *app.world().get::<TrackDrive>(root).unwrap(),
+                before,
+                "contact-only publication waits for the loop"
             );
         }
+        app.insert_resource(SubstepCount(2));
+        app.world_mut().run_schedule(DriveCommitTest);
+        let after = app.world().get::<TrackDrive>(root).unwrap();
+        assert_ne!(final_speeds, [0.0; 2], "the fixture must move the belts");
+        assert_eq!(after.sides.map(|s| s.speed), final_speeds);
+        assert_eq!(after.sides.map(|s| s.phase), expected_phases);
+        assert!(
+            !app.world().get::<LastPass>(root).unwrap().at_rest,
+            "a contact-moved belt invalidates rest"
+        );
         assert_eq!(
-            app.world().get::<TankTransmission>(root).unwrap().0,
-            transmission,
-            "contact-only state does not invent another motor advance"
+            app.world().get::<SleepTimer>(root).unwrap().0,
+            0.0,
+            "a contact-moved belt resets the rest timer"
         );
     }
 
@@ -2136,7 +2176,6 @@ mod tests {
         };
         let prepare = key(prepare_surface_speeds.system_type_id());
         let collect = key(collect_surface_speeds.system_type_id());
-        let advance = key(advance_drivetrains.system_type_id());
         let groups = graph
             .hierarchy()
             .clone()
@@ -2145,33 +2184,40 @@ mod tests {
         let mut flat = groups.flatten(graph.dependency().clone(), |_, _, _, _| {});
         let analysis = flat.analyze().unwrap();
         let ordered = |a, b| analysis.transitive_closure().contains_edge(a, b);
-        assert!(
-            ordered(collect, advance),
-            "contacts precede the motor solve"
-        );
-        for &warm in graph
-            .systems_in_set(SubstepSolverSystems::WarmStart.intern())
-            .unwrap()
-        {
+        let check_set = |set: bevy::ecs::intern::Interned<dyn SystemSet>, before: bool| {
+            let members = graph
+                .systems_in_set(set)
+                .expect("the pinned upstream solver set exists");
             assert!(
-                ordered(prepare, warm),
-                "surface scratch precedes warm start"
+                !members.is_empty(),
+                "the pinned Avian solver set must retain its systems"
             );
-        }
-        for &relax in graph
-            .systems_in_set(SubstepSolverSystems::Relax.intern())
-            .unwrap()
-        {
-            assert!(ordered(relax, collect), "contact solve precedes readback");
-        }
-        for &joint in graph
+            for &member in members {
+                assert!(
+                    if before {
+                        ordered(prepare, member)
+                    } else {
+                        ordered(member, collect)
+                    },
+                    "surface preparation and readback bracket the upstream contact solve"
+                );
+            }
+        };
+        check_set(SubstepSolverSystems::WarmStart.intern(), true);
+        check_set(SubstepSolverSystems::Relax.intern(), false);
+        let joints = graph
             .systems_in_set(
                 avian3d::dynamics::solver::xpbd::XpbdSolverSystems::SolveConstraints.intern(),
             )
-            .unwrap()
-        {
-            assert!(ordered(advance, joint), "motor solve precedes XPBD");
-        }
+            .unwrap();
+        assert!(
+            !joints.is_empty(),
+            "the pinned Avian XPBD set must retain its systems"
+        );
+        assert!(
+            joints.iter().all(|&joint| ordered(collect, joint)),
+            "mechanical readback precedes XPBD"
+        );
     }
 
     /// The authority and resting trial rely on one call sequence, with no tick-rate speed
@@ -2190,6 +2236,7 @@ mod tests {
                 state.phases.map(f64::to_bits),
             )
         };
+        let mut contact_moved = false;
         for (fp, tp) in class_drivetrains() {
             for n in [1, 6, 11] {
                 let (mut app, _) = adapter_app();
@@ -2219,7 +2266,8 @@ mod tests {
                     root,
                     before,
                     steps: Vec::new(),
-                    contacts: Vec::new(),
+                    impulses: Vec::new(),
+                    contact_moved: false,
                 });
                 assert_substep_dependencies(app.get_schedule(SubstepSchedule).unwrap());
                 app.add_systems(
@@ -2230,8 +2278,7 @@ mod tests {
                             .before(SubstepSolverSystems::WarmStart),
                         observe_surface_exchange
                             .after(collect_surface_speeds)
-                            .before(advance_drivetrains),
-                        observe_motor_step.after(advance_drivetrains).before(
+                            .before(
                             avian3d::dynamics::solver::xpbd::XpbdSolverSystems::SolveConstraints,
                         ),
                     ),
@@ -2300,14 +2347,13 @@ mod tests {
                 let h = dt.div_f64(f64::from(n)).as_secs_f32();
                 let observed = app.world().resource::<SubstepObservation>();
                 assert_eq!(observed.steps.len(), n as usize);
-                assert_eq!(observed.contacts.len(), n as usize);
-                for (actual, contact) in observed.steps.iter().zip(&observed.contacts) {
-                    expected.state.speeds = contact.speeds;
-                    assert_eq!(
-                        *contact, expected.state,
-                        "contacts exchange velocity between motor calls without another advance"
-                    );
-                    expected.advance(&construction(&fp), &tp, h);
+                assert_eq!(observed.impulses.len(), n as usize);
+                contact_moved |= observed.contact_moved;
+                for (actual, impulses) in observed.steps.iter().zip(&observed.impulses) {
+                    let mut coordinates =
+                        expected.prepare_contact(&construction(&fp), &tp, h, false);
+                    coordinates.add_impulses(*impulses);
+                    expected.finish_contact(&tp, &coordinates, h);
                     assert_eq!(*actual, expected.state);
                     assert_eq!(
                         bits(*actual),
@@ -2344,6 +2390,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            contact_moved,
+            "the schedule witness must move a left belt through contact"
+        );
     }
 
     fn finish_adapter(app: &mut App) {
@@ -2358,6 +2408,146 @@ mod tests {
         app.world_mut().run_schedule(DriveCommitTest);
     }
 
+    /// A holding brake must constrain the hull through rigid solver contacts at every substep
+    /// length. A sphere and angular locks isolate one translational contact; the brake rating supplies
+    /// the fixture mass so
+    /// both slopes stay within one side stop's capacity for every admitted construction.
+    #[test]
+    fn a_holding_brake_holds_on_a_solver_slab_at_any_substep_length() {
+        use avian3d::prelude::*;
+        fn clear_friction_cache(
+            mut graph: ResMut<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
+        ) {
+            for row in graph
+                .colors
+                .iter_mut()
+                .flat_map(|c| &mut c.contact_constraints)
+            {
+                for point in &mut row.points {
+                    if let Some(tangent) = &mut point.tangent_part {
+                        tangent.impulse = Vec2::ZERO;
+                    }
+                }
+            }
+        }
+        for n in [1, 3, 6, 12] {
+            for degrees in [15.0_f32, 30.0] {
+                let (mut app, _) = adapter_app();
+                let rotation = Quat::from_rotation_x(degrees.to_radians());
+                let downhill = rotation * Vec3::Z;
+                let top = Vec3::Y * 10.0; // Fixture slab datum, m.
+                let root = fixture_tank(&mut app, Vec3::ZERO);
+                let radius = app
+                    .world()
+                    .get::<Collider>(root)
+                    .unwrap()
+                    .shape()
+                    .as_cuboid()
+                    .expect("the fixture hull is a box")
+                    .half_extents
+                    .y;
+                let gear = app.world().resource::<TrackGear>();
+                // DERIVED fixture: at either slope, demand <= half this side stop's static rating.
+                let mass = gear.trans.brake_capacity_n * gear.trans.brake_static_factor
+                    / super::super::derive::G;
+                let at = top + rotation * Vec3::Y * radius;
+                app.world_mut().entity_mut(root).insert((
+                    Collider::sphere(radius),
+                    Mass(mass),
+                    Position(at),
+                    Rotation(rotation),
+                    Transform::from_translation(at).with_rotation(rotation),
+                    SleepingDisabled,
+                    LockedAxes::ROTATION_LOCKED,
+                    Friction::new(1.0), // Fixture grip exceeds tan(30 degrees).
+                    super::super::stop_contacts::BeltFace::new(
+                        Side::Left,
+                        vec![
+                            Vec2::new(-1.0, -1.0),
+                            Vec2::new(1.0, -1.0),
+                            Vec2::new(1.0, 1.0),
+                            Vec2::new(-1.0, 1.0),
+                        ],
+                        super::super::stop_contacts::Bearing::Whole,
+                    ),
+                ));
+                let size = Vec3::new(20.0, 1.0, 20.0); // Fixture slab dimensions, m.
+                let centre = top - rotation * Vec3::Y * size.y * 0.5;
+                app.world_mut().spawn((
+                    RigidBody::Static,
+                    Position(centre),
+                    Rotation(rotation),
+                    Transform::from_translation(centre).with_rotation(rotation),
+                    Collider::cuboid(size.x, size.y, size.z),
+                    Friction::new(1.0),
+                ));
+                app.insert_resource(SubstepCount(n));
+                // Fixture: no cached friction can hold the hull before integration. Retain
+                // Avian's normal warm start so this witness isolates tangential constraint.
+                app.add_systems(
+                    SubstepSchedule,
+                    clear_friction_cache
+                        .after(prepare_surface_speeds)
+                        .before(SubstepSolverSystems::WarmStart),
+                );
+
+                app.update();
+                app.update();
+                app.insert_resource(Gravity(Vec3::NEG_Y * super::super::derive::G));
+                let dt = std::time::Duration::from_micros(15_625); // Fixture: one 64 Hz tick.
+                let h = dt.div_f64(f64::from(n)).as_secs_f32();
+                let mut start = Vec3::ZERO;
+                let mut peak = 0.0_f32;
+                for tick in 0..4 * 64 {
+                    // Fixture: one second to settle, three seconds held awake.
+                    if tick == 64 {
+                        start = app.world().get::<Position>(root).unwrap().0;
+                    }
+                    app.world_mut()
+                        .resource_mut::<Time<avian3d::prelude::Physics>>()
+                        .advance_by(dt);
+                    app.world_mut().run_schedule(PhysicsSchedule);
+                    if tick >= 64 {
+                        peak = peak.max(
+                            app.world()
+                                .get::<LinearVelocity>(root)
+                                .unwrap()
+                                .0
+                                .dot(downhill)
+                                .abs(),
+                        );
+                        assert_eq!(
+                            app.world()
+                                .get::<TrackDrive>(root)
+                                .unwrap()
+                                .sides
+                                .map(|s| s.speed),
+                            [0.0; 2],
+                            "the brake must remain held"
+                        );
+                    }
+                }
+                let end = app.world().get::<Position>(root).unwrap().0;
+                let travel = (end - start).dot(downhill);
+                // Resolution: f32 gravity/warm impulses and tangent updates, at most 64 ulps of
+                // the gravitational velocity increment; world pose assembly has its own units.
+                let velocity_rounding = 64.0 * f32::EPSILON * super::super::derive::G * h;
+                let position_rounding = 64.0 * f32::EPSILON * end.length();
+                println!(
+                    "MEASURED rigid brake hold {degrees} deg n={n}: peak speed {peak} m/s, travel {travel} m"
+                );
+                assert!(
+                    peak <= velocity_rounding,
+                    "held hull speed {peak}, f32 allowance {velocity_rounding}"
+                );
+                assert!(
+                    travel.abs() <= position_rounding,
+                    "held hull travel {travel}, f32 allowance {position_rounding}"
+                );
+            }
+        }
+    }
+
     /// An accepted resting sequence already owns this tick's mechanical work. A late island
     /// wake must neither repeat it nor discard it; the authority still publishes its crank once.
     /// Fixture: awake at commit (the late-wake state), parked belts and a stopped crank.
@@ -2366,6 +2556,11 @@ mod tests {
         use super::super::drive_fixture::{class_drivetrains, construction, input};
         for (fp, tp) in class_drivetrains() {
             let (mut app, _) = adapter_app();
+            {
+                let mut gear = app.world_mut().resource_mut::<TrackGear>();
+                gear.construction = construction(&fp);
+                gear.trans = tp.clone();
+            }
             let root = fixture_tank(&mut app, Vec3::Y * 100.0);
             app.update();
             app.update();
@@ -2407,7 +2602,10 @@ mod tests {
                     ..default()
                 },
             ));
-            finish_adapter(&mut app);
+            app.world_mut()
+                .resource_mut::<Time<avian3d::prelude::Physics>>()
+                .advance_by(std::time::Duration::from_secs_f32(inp.dt));
+            app.world_mut().run_schedule(PhysicsSchedule);
             assert_eq!(
                 app.world().get::<TankTransmission>(root).unwrap().0,
                 expected.transmission
@@ -2553,6 +2751,7 @@ mod tests {
     fn solver_contact_history_does_not_charge_a_belt_again() {
         use crate::contact_transfer::{ContactTransfer, ContactTransfers};
         let run = |impulse: f32| {
+            let mu = 0.712; // Fixture contact friction.
             let (mut app, _) = adapter_app();
             let root = fixture_tank(&mut app, Vec3::Y * 100.0); // Fixture: no spring support.
             let outline = vec![
@@ -2591,10 +2790,10 @@ mod tests {
                     other_collider: Some(other),
                     point: Vec3::Y * 99.0,
                     normal: Vec3::NEG_Y,
-                    impulse: Vec3::Z * impulse - Vec3::Y * (impulse / 0.712),
+                    impulse: Vec3::Z * impulse - Vec3::Y * (impulse / mu),
                     effective_mass: 1.0,
                     closing_speed: 0.0,
-                    friction: 0.712,
+                    friction: mu,
                 }]],
                 1.0 / 64.0,
             ));
@@ -2617,9 +2816,8 @@ mod tests {
                 reaction,
             )
         };
-        // Fixture: replay the order of magnitude of the recorded solver exchange, N s.
-        let (free, loaded) = (run(0.0), run(1_670_830.4));
-        println!("MEASURED history replay: free={free:?}, delivered={loaded:?}");
+        // Fixture: a large already-delivered solver exchange, N s.
+        let (free, loaded) = (run(0.0), run(1_000_000.0));
         assert_eq!(
             loaded, free,
             "a delivered impulse cannot be integrated into a belt again"
