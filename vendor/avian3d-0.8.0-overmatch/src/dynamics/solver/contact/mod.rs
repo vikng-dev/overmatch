@@ -15,7 +15,45 @@ use crate::{
 use bevy::reflect::{ReflectDeserialize, ReflectSerialize};
 use bevy::{reflect::Reflect, utils::default};
 
-use super::solver_body::{SolverBody, SolverBodyIndex, SolverBodyInertia};
+use super::solver_body::{SolverBody, SolverBodyIndex, SolverBodyInertia, SurfaceCoordinate};
+
+/// OVERMATCH PATCH: friction adapters share Avian's graph-colored body ownership. Warm start
+/// follows the rigid-body warm impulse; a custom accumulator then records the impulse actually
+/// applied. Solve replaces ordinary friction after the normal row has relaxed.
+#[derive(Clone, Copy, Debug)]
+pub enum SurfaceFrictionStage {
+    /// Mirror the rigid-body warm impulse into the scalar coordinates, at this scale.
+    WarmStart(f32),
+    /// Solve finite-surface friction after the normal row.
+    Solve,
+}
+
+/// Callback operating under the contact constraint's exclusive body ownership.
+pub type SurfaceFrictionFn = fn(
+    &mut ContactConstraint,
+    &mut SolverBody,
+    &mut SolverBody,
+    &SolverBodyInertia,
+    &SolverBodyInertia,
+    SurfaceFrictionStage,
+);
+
+/// Opt-in adapter; absent on ordinary Avian contacts and reattached after serialization.
+#[derive(Clone, Copy)]
+pub struct SurfaceFrictionHook(
+    /// The adapter called during warm start and relaxation.
+    pub SurfaceFrictionFn,
+);
+impl core::fmt::Debug for SurfaceFrictionHook {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SurfaceFrictionHook")
+    }
+}
+impl PartialEq for SurfaceFrictionHook {
+    fn eq(&self, other: &Self) -> bool {
+        core::ptr::fn_addr_eq(self.0, other.0)
+    }
+}
 
 // TODO: One-body constraint version
 /// Data and logic for solving a single contact point for a [`ContactConstraint`].
@@ -56,6 +94,12 @@ pub struct ContactConstraintPoint {
 #[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
 #[reflect(Debug, PartialEq)]
 pub struct ContactConstraint {
+    /// OVERMATCH PATCH: opt-in surface coordinates and their game-side friction solver.
+    pub surface_coordinates: [Option<SurfaceCoordinate>; 2],
+    /// Custom finite-surface friction; the ordinary row runs when absent.
+    #[reflect(ignore)]
+    #[cfg_attr(feature = "serialize", serde(skip))]
+    pub surface_hook: Option<SurfaceFrictionHook>,
     /// The [`SolverBodyIndex`] of the first body in the contact,
     /// or [`SolverBodyIndex::INVALID`] if it is static or sleeping.
     pub body_index1: SolverBodyIndex,
@@ -192,6 +236,8 @@ impl ContactConstraint {
         }
 
         ContactConstraint {
+            surface_coordinates: [None; 2],
+            surface_hook: None,
             body_index1,
             body_index2,
             relative_dominance,
@@ -212,13 +258,17 @@ impl ContactConstraint {
 
     /// Warm starts the contact constraint by applying the impulses from the previous frame or substep.
     pub fn warm_start(
-        &self,
+        &mut self,
         body1: &mut SolverBody,
         body2: &mut SolverBody,
         inertia1: &SolverBodyInertia,
         inertia2: &SolverBodyInertia,
         warm_start_coefficient: f32,
     ) {
+        assert!(
+            self.surface_hook.is_some() || self.surface_coordinates.iter().all(Option::is_none),
+            "surface coordinates require their friction hook to be attached before solving"
+        );
         let inv_mass1 = inertia1.effective_inv_mass();
         let inv_mass2 = inertia2.effective_inv_mass();
         let inv_angular_inertia1 = inertia1.effective_inv_angular_inertia();
@@ -252,6 +302,16 @@ impl ContactConstraint {
             body2.linear_velocity += p * inv_mass2;
             body2.angular_velocity += inv_angular_inertia2 * cross(r2, p);
         }
+        if let Some(hook) = self.surface_hook {
+            (hook.0)(
+                self,
+                body1,
+                body2,
+                inertia1,
+                inertia2,
+                SurfaceFrictionStage::WarmStart(warm_start_coefficient),
+            );
+        }
     }
 
     /// Solves the [`ContactConstraint`], applying an impulse to the given bodies.
@@ -264,6 +324,10 @@ impl ContactConstraint {
         delta_secs: f32,
         max_overlap_solve_speed: f32,
     ) {
+        assert!(
+            self.surface_hook.is_some() || self.surface_coordinates.iter().all(Option::is_none),
+            "surface coordinates require their friction hook to be attached before solving"
+        );
         let inv_mass1 = inertia1.effective_inv_mass();
         let inv_mass2 = inertia2.effective_inv_mass();
         let inv_angular_inertia1 = inertia1.effective_inv_angular_inertia();
@@ -308,7 +372,7 @@ impl ContactConstraint {
 
         // Friction impulses, only during the relaxation stage.
         // Applying friction during the bias stage does not meaningfully improve quality for the cost.
-        if !USE_BIAS {
+        if !USE_BIAS && self.surface_hook.is_none() {
             let tangent_directions = self.tangent_directions();
 
             for point in self.points.iter_mut() {
@@ -342,6 +406,16 @@ impl ContactConstraint {
                 body2.linear_velocity += impulse * inv_mass2;
                 body2.angular_velocity += inv_angular_inertia2 * cross(r2, impulse);
             }
+        }
+        if !USE_BIAS && let Some(hook) = self.surface_hook {
+            (hook.0)(
+                self,
+                body1,
+                body2,
+                inertia1,
+                inertia2,
+                SurfaceFrictionStage::Solve,
+            );
         }
     }
 

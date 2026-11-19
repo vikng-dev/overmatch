@@ -1,5 +1,5 @@
 //! Moving outer shoe faces for the game's driving physics. Hard contacts stay in Avian;
-//! their delivered friction returns to the transmission on the next driving tick.
+//! finite belt coordinates exchange friction in the solver step that sizes it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -236,168 +236,72 @@ impl CollisionHooks for WorldContacts<'_, '_> {
     }
 }
 
-/// One prepared constraint, owned by the lower Entity of its belt owners.
-struct SurfaceConstraint {
-    color: usize,
-    index: usize,
-    faces: Vec<(Entity, Side, Vec3)>,
-}
-
-/// Tank-owned lists rebuilt after PrepareContactConstraints, including the overflow color.
-#[derive(Resource, Default)]
-pub(crate) struct BeltConstraints {
-    owners: BTreeMap<Entity, Vec<SurfaceConstraint>>,
-    order: Vec<(Entity, usize)>,
-}
-
-/// Avian 0.8 retains geometry and constraint indices throughout its substep loop
-/// (`solver/plugin.rs`), so only belt speeds need substep refresh.
-pub(crate) fn prepare_belt_surfaces(
-    graph: Res<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
-    contacts: Res<avian3d::prelude::ContactGraph>,
-    faces: Query<(&BeltFace, &avian3d::prelude::ColliderOf)>,
-    poses: Query<(&Position, &Rotation)>,
-    mut belts: ResMut<BeltConstraints>,
+/// Bind the geometry of a moving face to its owner's finite solver coordinate. The native
+/// contact pair fixes collider/body order; a coordinate contributes to relative velocity v2-v1.
+fn bind_surface(
+    constraint: &mut avian3d::dynamics::solver::contact::ContactConstraint,
+    pair: &ContactPair,
+    faces: &Query<(&BeltFace, &ColliderOf)>,
+    poses: &Query<(&Position, &Rotation)>,
 ) {
-    belts.prepare(&graph, &contacts, &faces, &poses);
+    use avian3d::dynamics::solver::{contact::SurfaceFrictionHook, solver_body::SurfaceCoordinate};
+    let points = &pair.manifolds[constraint.manifold_index].points;
+    let centre = points.iter().map(|point| point.point).sum::<Vec3>() / points.len() as f32;
+    constraint.surface_coordinates =
+        [(pair.collider1, -1.0), (pair.collider2, 1.0)].map(|(collider, sign)| {
+            let Ok((face, of)) = faces.get(collider) else {
+                return None;
+            }; // Ordinary surface.
+            let (position, rotation) = poses
+                .get(of.body)
+                .expect("a moving face has its owner's physics pose");
+            Some(SurfaceCoordinate {
+                index: face.side.index(),
+                direction: sign
+                    * face.velocity(
+                        centre,
+                        -sign * constraint.normal,
+                        (position.0, rotation.0),
+                        1.0,
+                    ),
+            })
+        });
+    constraint.surface_hook = constraint
+        .surface_coordinates
+        .iter()
+        .any(Option::is_some)
+        .then_some(SurfaceFrictionHook(crate::avian_ext::surface_motion::solve));
 }
 
-impl BeltConstraints {
-    pub(crate) fn prepare(
-        &mut self,
-        graph: &avian3d::dynamics::solver::constraint_graph::ConstraintGraph,
-        contacts: &avian3d::prelude::ContactGraph,
-        faces: &Query<(&BeltFace, &ColliderOf)>,
-        poses: &Query<(&Position, &Rotation)>,
-    ) {
-        use bevy::tasks::{ComputeTaskPool, ParallelSlice};
-        self.owners.clear();
-        self.order.clear();
-        let work: Vec<_> = graph
-            .colors
-            .iter()
-            .enumerate()
-            .flat_map(|(color, group)| {
-                group
-                    .contact_constraints
-                    .iter()
-                    .enumerate()
-                    .map(move |(index, constraint)| (color, index, constraint))
-            })
-            .collect();
-        if work.is_empty() {
-            return; // No active constraints need lookup or task dispatch.
+/// Avian retains constraint geometry throughout its substep loop. Bind each contact once;
+/// scalar speeds themselves are prepared per substep and changed by the contact solver.
+pub(crate) fn prepare_belt_surfaces(
+    mut graph: ResMut<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
+    contacts: Res<avian3d::prelude::ContactGraph>,
+    faces: Query<(&BeltFace, &ColliderOf)>,
+    poses: Query<(&Position, &Rotation)>,
+) {
+    use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
+    let mut constraints: Vec<_> = graph
+        .colors
+        .iter_mut()
+        .flat_map(|color| &mut color.contact_constraints)
+        .collect();
+    constraints.par_splat_map_mut(ComputeTaskPool::get(), None, |_, batch| {
+        for constraint in batch {
+            let (_, pair) = contacts
+                .get_by_id(constraint.contact_id)
+                .expect("a prepared constraint retains its contact pair");
+            bind_surface(constraint, pair, &faces, &poses);
         }
-        let prepared = work.par_splat_map(ComputeTaskPool::get(), None, |_, batch| {
-            batch
-                .iter()
-                .filter_map(|(color, index, constraint)| {
-                    let (_, pair) = contacts
-                        .get_by_id(constraint.contact_id)
-                        .expect("a prepared constraint retains its contact pair");
-                    let surfaces: Vec<_> = [(pair.collider1, -1.0), (pair.collider2, 1.0)]
-                        .into_iter()
-                        .filter_map(|(collider, sign)| {
-                            match faces.get(collider) {
-                                Ok((face, of)) => Some((face, of.body, sign)),
-                                Err(_) => None, // Ordinary surface: no belt motion on its body.
-                            }
-                        })
-                        .collect();
-                    // Ordinary surfaces have no belt owner or moving-face velocity to publish.
-                    let owner = surfaces.iter().map(|(_, body, _)| *body).min()?;
-                    let points = &pair.manifolds[constraint.manifold_index].points;
-                    let centre = points.iter().map(|p| p.point).sum::<Vec3>() / points.len() as f32;
-                    let faces = surfaces
-                        .iter()
-                        .map(|(face, body, sign)| {
-                            let (position, rotation) = poses
-                                .get(*body)
-                                .expect("a belt face has its body's physics pose");
-                            (
-                                *body,
-                                face.side,
-                                *sign
-                                    * face.velocity(
-                                        centre,
-                                        -*sign * constraint.normal,
-                                        (position.0, rotation.0),
-                                        1.0,
-                                    ),
-                            )
-                        })
-                        .collect();
-                    Some((
-                        owner,
-                        SurfaceConstraint {
-                            color: *color,
-                            index: *index,
-                            faces,
-                        },
-                    ))
-                })
-                .collect::<Vec<_>>()
-        });
-        // Commit in graph order: substeps split disjoint mutable borrows by these indices.
-        for (owner, row) in prepared.into_iter().flatten() {
-            let owned = self.owners.entry(owner).or_default();
-            self.order.push((owner, owned.len()));
-            owned.push(row);
-        }
-    }
-
-    /// Avian reads world-space v2-v1 (m/s) during Relax. Split only listed constraints into
-    /// disjoint borrows at the graph's atomic boundary; batch calculations by constraint count,
-    /// across owners and within colors. Both belt owners are immutable after their advances.
-    pub(crate) fn update(
-        &self,
-        graph: &mut avian3d::dynamics::solver::constraint_graph::ConstraintGraph,
-        speeds: impl Fn(Entity) -> [f32; 2] + Sync + Send,
-    ) {
-        use bevy::tasks::{ComputeTaskPool, ParallelSliceMut};
-        if self.order.is_empty() {
-            return; // No active belt constraints: no substep dispatch or world scan.
-        }
-        let mut listed = self
-            .order
-            .iter()
-            .map(|(owner, at)| &self.owners[owner][*at])
-            .peekable();
-        let mut writes = Vec::with_capacity(self.order.len());
-        for (color, group) in graph.colors.iter_mut().enumerate() {
-            let mut tail = group.contact_constraints.as_mut_slice();
-            let mut cursor = 0;
-            while listed.peek().is_some_and(|row| row.color == color) {
-                let row = listed
-                    .next()
-                    .expect("the listed color has a next constraint");
-                let (_, after) = tail.split_at_mut(row.index - cursor);
-                let (constraint, rest) = after
-                    .split_first_mut()
-                    .expect("a prepared belt constraint survives every substep");
-                writes.push((row, constraint));
-                tail = rest;
-                cursor = row.index + 1;
-            }
-        }
-        writes.par_splat_map_mut(ComputeTaskPool::get(), None, |_, batch| {
-            for (row, constraint) in batch {
-                constraint.tangent_velocity = row
-                    .faces
-                    .iter()
-                    .map(|(body, side, direction)| *direction * speeds(*body)[side.index()])
-                    .sum();
-            }
-        });
-    }
+    });
 }
 
 /// One solver point's impulse on a moving shoe, with its outward unit normal. The solver
-/// already applied it to the hull: only its belt reaction is owed, never another hull force.
+/// applied it to both hull and belt; the Driver reads only traction and grip history.
 #[derive(Clone, Copy)]
 pub(crate) struct BeltImpulse {
     collider: Entity,
-    point: Vec3,
     outward: Vec3,
     impulse: Vec3,
     friction: f32,
@@ -425,7 +329,6 @@ pub(crate) fn by_owner(
             };
             owners.entry(of.body).or_default().push(BeltImpulse {
                 collider,
-                point: point.point,
                 outward: -sign * point.normal,
                 impulse: sign * point.impulse,
                 friction: point.friction,
@@ -436,11 +339,9 @@ pub(crate) fn by_owner(
 }
 
 /// One side's solver contact over the last physics step (N): the friction it delivered to the
-/// hull, in the world frame, that friction's reaction along the belt's travel, and its grip limit,
-/// the solver's coefficient times the normal force at each point.
+/// hull in world space and its grip limit (coefficient times normal force at each point).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct HardReaction {
-    pub(crate) belt: f32,
     pub(crate) friction: Vec3,
     pub(crate) grip: f32,
 }
@@ -448,8 +349,6 @@ pub(crate) struct HardReaction {
 pub(crate) fn reactions(
     points: &[BeltImpulse],
     dt: f32,
-    position: Vec3,
-    rotation: Quat,
     faces: &Query<(&BeltFace, &ColliderOf)>,
 ) -> [Option<HardReaction>; 2] {
     let mut reactions = [None; 2];
@@ -462,17 +361,10 @@ pub(crate) fn reactions(
             .expect("the tick-start contact snapshot retains its shoe collider through driving");
         assert!(dt > 0.0, "a solver impulse has a positive physics step");
         let friction = point.impulse - point.outward * point.impulse.dot(point.outward);
-        let direction = rotation
-            * face.direction(
-                rotation.inverse() * (point.point - position),
-                rotation.inverse() * point.outward,
-            );
         let reaction = reactions[face.side.index()].get_or_insert(HardReaction {
-            belt: 0.0,
             friction: Vec3::ZERO,
             grip: 0.0,
         });
-        reaction.belt -= friction.dot(direction) / dt;
         reaction.friction += friction / dt;
         reaction.grip += point.friction * point.impulse.dot(point.outward).abs() / dt;
     }
@@ -502,11 +394,11 @@ mod tests {
         )
     }
 
-    /// Every rigid shoe face must carry the signed belt speed in world space, whichever
-    /// collider Avian puts first. Drivers rely on the front wrap moving downward and the
-    /// bottom moving rearward, including a lateral contact's nearest outline edge.
+    /// Every rigid shoe face binds its signed scalar coefficient in world space, in either
+    /// collider order. Drivers rely on front-wrap motion downward and bottom motion rearward,
+    /// including a lateral contact's nearest outline edge.
     #[test]
-    fn each_substep_moves_each_face_at_its_own_speed_in_either_pair_order() {
+    fn each_face_binds_its_surface_coordinate_in_either_pair_order() {
         bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
         for rotation in [
             Quat::IDENTITY,
@@ -589,29 +481,25 @@ mod tests {
                     world
                         .run_system_once(move |hooks: WorldContacts, mut commands: Commands,
                             faces: Query<(&BeltFace, &ColliderOf)>, poses: Query<(&Position, &Rotation)>| {
-                            use avian3d::collision::contact_types::{ContactEdge, ContactGraph};
-                            use avian3d::dynamics::solver::{contact::ContactConstraint, constraint_graph::ConstraintGraph, solver_body::SolverBodyIndex};
+                            use avian3d::dynamics::solver::{contact::ContactConstraint, solver_body::SolverBodyIndex};
                             assert!(hooks.modify_contacts(&mut pair, &mut commands));
                             assert_eq!(pair.manifolds[0].friction, 0.37);
                             assert_eq!(pair.manifolds[0].tangent_velocity, Vec3::ZERO, "the hook never publishes tick-start belt speed");
-                            let mut contacts = ContactGraph::default();
-                            let id = contacts.add_edge_with(ContactEdge::new(pair.collider1, pair.collider2), |p| p.manifolds.clone_from(&pair.manifolds)).unwrap();
-                            let mut graph = ConstraintGraph::default();
-                            graph.colors[0].contact_constraints.push(ContactConstraint {
+                            let mut constraint = ContactConstraint {
+                                surface_coordinates: [None; 2], surface_hook: None,
                                 body_index1: SolverBodyIndex::INVALID, body_index2: SolverBodyIndex::INVALID,
                                 relative_dominance: 0, friction: 0.37, restitution: 0.0,
                                 tangent_velocity: Vec3::ZERO, normal: pair.manifolds[0].normal,
-                                tangent1: Vec3::X, points: Vec::new(), contact_id: id, manifold_index: 0,
-                            });
-                            let mut belts = BeltConstraints::default();
-                            belts.prepare(&graph, &contacts, &faces, &poses);
-                            // Fixture: distinct consecutive substep speeds; overwrites must not accumulate.
-                            for speed in [2.0, -3.0, 0.0] {
-                                belts.update(&mut graph, |_| [speed; 2]);
-                                let expected = sign * (rotation * direction) * speed;
-                                // Resolution: repeated world/local rotations may differ by f32 roundoff.
-                                assert!((graph.colors[0].contact_constraints[0].tangent_velocity - expected).length() < 1e-5);
-                            }
+                                tangent1: Vec3::X, points: Vec::new(), contact_id: ContactId::PLACEHOLDER, manifold_index: 0,
+                            };
+                            bind_surface(&mut constraint,&pair,&faces,&poses);
+                            let side = usize::from(!first);
+                            let coordinate = constraint.surface_coordinates[side].unwrap();
+                            assert_eq!(coordinate.index, Side::Left.index());
+                            assert!(constraint.surface_coordinates[1-side].is_none());
+                            assert!(constraint.surface_hook.is_some());
+                            // Resolution: repeated world/local rotations differ by f32 roundoff.
+                            assert!((coordinate.direction-sign*(rotation*direction)).length()<1e-5);
                         })
                         .unwrap();
                 }
@@ -619,10 +507,10 @@ mod tests {
         }
     }
 
-    /// Belt-on-belt surfaces read both owners but write once, including Avian's overflow color.
-    /// Unrelated constraints keep their velocity; an empty list must never request owner speeds.
+    /// Belt-on-belt contacts bind both owners, including the overflow color. Ordinary contacts
+    /// keep their prescribed-surface contract; removing a face leaves no cached owner path.
     #[test]
-    fn shared_belt_constraints_have_one_owner_and_leave_other_surfaces_untouched() {
+    fn both_surface_bindings_follow_pair_order_including_overflow() {
         bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
         use avian3d::collision::contact_types::{ContactEdge, ContactGraph};
         use avian3d::dynamics::solver::{
@@ -637,68 +525,64 @@ mod tests {
                 .spawn((face(Side::Left, Bearing::Whole), ColliderOf { body }))
                 .id()
         });
-        let other = [0, 1].map(|_| world.spawn_empty().id());
-        world
-            .run_system_once(
-                move |faces: Query<(&BeltFace, &ColliderOf)>,
-                      poses: Query<(&Position, &Rotation)>| {
-                    let mut contacts = ContactGraph::default();
-                    let mut pair = |colliders: [Entity; 2]| {
-                        contacts
-                            .add_edge_with(ContactEdge::new(colliders[0], colliders[1]), |p| {
-                                p.manifolds.push(ContactManifold::new(
-                                    [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0)],
-                                    -Vec3::Y,
-                                ))
-                            })
-                            .unwrap()
-                    };
-                    let belt = pair(shoes);
-                    let ordinary = pair(other);
-                    // Fixture: a sentinel velocity for ordinary surfaces, distinct from either belt.
-                    let constraint = |contact_id| ContactConstraint {
-                        body_index1: SolverBodyIndex::INVALID,
-                        body_index2: SolverBodyIndex::INVALID,
-                        relative_dominance: 0,
-                        friction: 1.0,
-                        restitution: 0.0,
-                        tangent_velocity: Vec3::X,
-                        normal: -Vec3::Y,
-                        tangent1: Vec3::X,
-                        points: Vec::new(),
-                        contact_id,
-                        manifold_index: 0,
-                    };
-                    for color in [0, COLOR_OVERFLOW_INDEX] {
-                        let mut graph = ConstraintGraph::default();
-                        graph.colors[color].contact_constraints =
-                            vec![constraint(ordinary), constraint(belt), constraint(ordinary)];
-                        let mut belts = BeltConstraints::default();
-                        belts.prepare(&graph, &contacts, &faces, &poses);
-                        assert_eq!(belts.owners.len(), 1);
-                        assert_eq!(belts.owners[&bodies[0].min(bodies[1])].len(), 1);
-                        // Fixture: opposite exposed faces carry 3 and 5 m/s; v2-v1 sums their tangents.
-                        belts.update(&mut graph, |body| {
-                            if body == bodies[0] {
-                                [3.0; 2]
-                            } else {
-                                [5.0; 2]
-                            }
-                        });
-                        let rows = &graph.colors[color].contact_constraints;
-                        assert_eq!(rows[0].tangent_velocity, Vec3::X);
-                        assert_eq!(rows[1].tangent_velocity, -8.0 * Vec3::Z);
-                        assert_eq!(rows[2].tangent_velocity, Vec3::X);
-                        graph.colors[color].contact_constraints.remove(1);
-                        belts.prepare(&graph, &contacts, &faces, &poses);
-                        assert!(belts.owners.is_empty());
-                        belts.update(&mut graph, |_| {
-                            panic!("no belt constraints may read an owner")
-                        });
-                    }
-                },
-            )
-            .unwrap();
+        let ordinary = [0, 1].map(|_| world.spawn_empty().id());
+        let mut contacts = ContactGraph::default();
+        let mut pair = |colliders: [Entity; 2]| {
+            contacts
+                .add_edge_with(ContactEdge::new(colliders[0], colliders[1]), |p| {
+                    p.manifolds.push(ContactManifold::new(
+                        [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0)],
+                        -Vec3::Y,
+                    ));
+                })
+                .unwrap()
+        };
+        let belt = pair(shoes);
+        let ordinary = pair(ordinary);
+        world.insert_resource(contacts);
+        let constraint = |contact_id| ContactConstraint {
+            surface_coordinates: [None; 2],
+            surface_hook: None,
+            body_index1: SolverBodyIndex::INVALID,
+            body_index2: SolverBodyIndex::INVALID,
+            relative_dominance: 0,
+            friction: 1.0,
+            restitution: 0.0,
+            tangent_velocity: Vec3::X,
+            normal: -Vec3::Y,
+            tangent1: Vec3::X,
+            points: Vec::new(),
+            contact_id,
+            manifold_index: 0,
+        };
+        for color in [0, COLOR_OVERFLOW_INDEX] {
+            let mut graph = ConstraintGraph::default();
+            graph.colors[color].contact_constraints =
+                vec![constraint(ordinary), constraint(belt), constraint(ordinary)];
+            world.insert_resource(graph);
+            world.run_system_once(prepare_belt_surfaces).unwrap();
+            let mut graph = world.resource_mut::<ConstraintGraph>();
+            let rows = &mut graph.colors[color].contact_constraints;
+            assert!(rows[0].surface_hook.is_none() && rows[2].surface_hook.is_none());
+            assert_eq!(rows[0].tangent_velocity, Vec3::X);
+            assert_eq!(rows[2].tangent_velocity, Vec3::X);
+            assert!(rows[1].surface_hook.is_some());
+            let coordinates = rows[1].surface_coordinates.map(Option::unwrap);
+            assert!(coordinates.iter().all(|c| c.index == Side::Left.index()));
+            // Fixture speeds: the two exposed faces contribute to the same relative row.
+            assert_eq!(
+                coordinates[0].direction * 3.0 + coordinates[1].direction * 5.0,
+                -8.0 * Vec3::Z
+            );
+            rows.remove(1);
+            world.run_system_once(prepare_belt_surfaces).unwrap();
+            assert!(
+                world.resource::<ConstraintGraph>().colors[color]
+                    .contact_constraints
+                    .iter()
+                    .all(|r| r.surface_hook.is_none())
+            );
+        }
     }
 
     /// A side slice bears only lateral contact through its exposed face ([`Bearing::Exposed`]): its
@@ -1006,7 +890,7 @@ mod tests {
                 impulse: Vec3::new(0.0, -10.0, 3.0), // Fixture N s into the other body.
                 effective_mass: 1.0,
                 closing_speed: 0.0,
-                friction: 0.5, // Fixture solver coefficient.,
+                friction: 0.5, // Fixture solver coefficient.
             };
             if reverse {
                 point = ContactTransfer {
@@ -1024,17 +908,10 @@ mod tests {
                 .run_system_once(move |faces: Query<(&BeltFace, &ColliderOf)>| {
                     let owners = by_owner(&transfers, &faces);
                     assert_eq!(owners.len(), 1);
-                    let reaction = reactions(
-                        &owners[&body],
-                        transfers.dt(),
-                        Vec3::ZERO,
-                        Quat::IDENTITY,
-                        &faces,
-                    );
+                    let reaction = reactions(&owners[&body], transfers.dt(), &faces);
                     // DERIVED 3 N s / 0.25 s, driving the hull forward (-Z); the grip limit
                     // 0.5 × 10 N s / 0.25 s.
                     let right = HardReaction {
-                        belt: 12.0,
                         friction: Vec3::new(0.0, 0.0, -12.0),
                         grip: 20.0,
                     };

@@ -15,8 +15,8 @@ Subject: the game's server physics (rigid bodies, contacts, rest). Game state on
 Each patch takes one form, named in its section:
 
 - **hook**: a narrow extension point inside an upstream file; the law it serves lives in the game
-  (`src/avian_ext/`, one file per seam, installed by `avian_ext::plugin` after
-  `PhysicsPlugins`).
+  (`src/avian_ext/`, one file per seam). `avian_ext::plugin` or the feature's owning adapter
+  installs it after `PhysicsPlugins`.
 - **module**: a self-contained fork file with a few call sites in upstream files.
 - **game-side**: no fork line; the game attaches through public schedule slots, components and
   resources.
@@ -24,7 +24,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff --minimal -ruN`
-of `src/` against the published crate: 875 in all (MEASURED), 797 in upstream files and 78 in the
+of `src/` against the published crate: 983 in all (MEASURED), 905 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -677,3 +677,21 @@ color, never every constraint. Reset runs in `PhysicsStepSystems::First`.
 The engine's solver, diagnostics and slice-dispatch helper are pristine: 0 fork lines (MEASURED).
 The dispatch-contract tripwire is in the game module. `src/net/ram/avian_tests.rs` retains the
 pass-count, reset, serial/parallel and overflow assertions.
+
+## Finite moving surfaces
+
+Form: **hook**, for a game divergence; the finite-surface law has one game-side owner.
+`SolverBody::surface_speeds` carries adapter-prepared scalar velocities,
+independent inertias and substep work. `ContactConstraint::{surface_coordinates,surface_hook}`
+binds their coefficients in relative contact velocity and dispatches warm start and friction
+under the existing graph-colored body ownership. Ordinary contacts retain stock Avian friction.
+The hook is transient and is reattached after serialization. A custom warm-start accumulator
+records the impulse actually applied, including the warm-start scale.
+
+The law lives in `src/avian_ext/surface_motion.rs`: a Coulomb disk over the rigid and scalar
+inertias, exchanging momentum with both immediately. The track adapter prepares coordinates
+before warm start and reads them at the contact/joint boundary. `ContactTransfers` respects the
+custom accumulator's warm-start convention. Guards: the finite-surface native-constraint tests,
+the track scheduling witness, and the contact-history regression. Proposal, unsent:
+`upstream/avian-finite-moving-surfaces.md`. The fork adds ownership and dispatch only, with no
+belt geometry, friction law or drivetrain policy.

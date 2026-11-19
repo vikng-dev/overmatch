@@ -58,8 +58,6 @@ pub(crate) struct DriveTick {
     max_assignments: usize,
     #[cfg(feature = "bitprobe")]
     pub(crate) belt_work: crate::bitprobe::BeltWorkProbe,
-    #[cfg(feature = "bitprobe")]
-    pub(crate) hard_impulses: Vec<bevy::prelude::Vec3>,
 }
 
 impl DriveTick {
@@ -91,8 +89,6 @@ impl DriveTick {
             max_rows: 0,
             #[cfg(feature = "bitprobe")]
             max_assignments: 0,
-            #[cfg(feature = "bitprobe")]
-            hard_impulses: Vec::new(),
             #[cfg(feature = "bitprobe")]
             belt_work: crate::bitprobe::BeltWorkProbe {
                 start_speeds: state.speeds,
@@ -131,6 +127,62 @@ impl DriveTick {
             }
         }
         self.last = Some(report);
+    }
+
+    /// Contact impulses update the same scalar coordinates the next free step reads. Clutch
+    /// readout follows their final relative speed; a pre-contact stop no longer holds a moving
+    /// belt. The motor and contact rows retain Avian's substep splitting.
+    pub(crate) fn accept_contact_speeds(&mut self, tp: &TransmissionParams, speeds: [f32; 2]) {
+        if speeds == self.state.speeds {
+            return;
+        }
+        self.state.speeds = speeds;
+        let controls = self.orders.controls;
+        let st = &mut self.state.transmission;
+        let k = controls.dir * controls.ratio / tp.sprocket_radius;
+        let locked = !controls.clutch_open
+            && tp
+                .couplings
+                .iter()
+                .filter_map(|c| match c {
+                    Coupling::Clutch(output) if !output.inner(controls.input.steer) => {
+                        Some(*output)
+                    }
+                    _ => None, // Only closed drive outputs constrain the crank.
+                })
+                .all(|output| {
+                    let weights = output.weights();
+                    let shaft = f64::from(k)
+                        * (weights[0] * f64::from(speeds[0]) + weights[1] * f64::from(speeds[1]));
+                    // Resolution: two f32 roundings carry the block's crank and belt results to state.
+                    (f64::from(st.omega_e) - shaft).abs()
+                        <= 2.0
+                            * f64::from(f32::EPSILON)
+                            * (f64::from(st.omega_e).abs() + shaft.abs())
+                });
+        st.clutch = if controls.clutch_open {
+            ClutchState::Out
+        } else if locked {
+            ClutchState::In
+        } else {
+            ClutchState::Slip
+        };
+        self.locked &= locked;
+        for (held, speed) in self.held.iter_mut().zip(speeds) {
+            *held &= speed == 0.0;
+        }
+        self.brakes_slide |= (st.park || controls.service) && speeds != [0.0; 2];
+        let report = self
+            .last
+            .as_mut()
+            .expect("a contact exchange follows its substep's motor advance");
+        report.next_speeds = speeds;
+        report.locked = locked;
+        #[cfg(feature = "bitprobe")]
+        {
+            report.bitprobe.next_speeds = speeds;
+            report.bitprobe.locked = locked;
+        }
     }
 
     pub fn report(&self, substeps: u32) -> TransmissionReport {

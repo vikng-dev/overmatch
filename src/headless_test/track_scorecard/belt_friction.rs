@@ -10,7 +10,7 @@
 //!
 //! Each case prints one `BELTFRICTION {json}` line. Per clutch regime, each taken within runs of
 //! consecutive ticks: the tick-to-tick alternation of the friction the solver delivered to each
-//! belt, of the belt's speed and of the hull's, and how often that friction flips sign; and, for
+//! side along the hull heading, of the belt's speed and of the hull's, and how often that friction flips sign; and, for
 //! each piece a belt touched, its speed reversals along the hull's forward axis, its largest speed
 //! change in one tick and its largest swing over three ticks. Every value is MEASURED from
 //! `ContactTransfers` (read through `stop_contacts`, as the drivetrain reads it), `TrackDrive`,
@@ -35,11 +35,11 @@ const FLIP_SHARE: f32 = 0.1;
 /// One side's solver contact over the step a tick just ran.
 #[derive(Clone, Copy, Default)]
 struct SideRead {
-    /// The belt's reaction to the friction the solver delivered over the step (N, along travel).
+    /// Solver traction delivered to the hull over the step (N, along its forward heading).
     delivered: f32,
     /// That friction's Coulomb limit (N).
     grip: f32,
-    /// The reaction the belt landed against this tick (N): `TrackGripEffect`.
+    /// Sampled-contact belt load this tick (N): `TrackGripEffect`.
     charged: f32,
 }
 
@@ -75,7 +75,7 @@ fn read(bed: &mut Bed) -> Reading {
     let hull = bed.hull();
     let mut sides = bed.hard_reactions().map(|hard| {
         hard.map_or(SideRead::default(), |h| SideRead {
-            delivered: h.belt,
+            delivered: h.friction.dot(hull.forward()),
             grip: h.grip,
             ..default()
         })

@@ -9,7 +9,8 @@
 //! relaxing passes; friction accumulates only in the relaxing pass. After the substeps restitution
 //! may add one more normal increment. The momentum one substep moves through a point is its post-relax
 //! accumulated impulse `I_s` less the share of the previous one warm starting did not reapply,
-//! `I_s − (1 − w) I_{s−1}`, normal and friction alike, and restitution moves its increment.
+//! `I_s − (1 − w) I_{s−1}`. Finite-surface friction scales its own accumulator at warm start,
+//! so its post-relax accumulator is already the applied impulse. Restitution moves its increment.
 //! [`ContactTransfers`] sums exactly that, from Avian's public solver state (`ConstraintGraph`):
 //! - before the substeps ([`SolverSystems::PreSubstep`]): one record per point of every constraint
 //!   with the point's warm-start impulse as `I_{−1}`;
@@ -22,7 +23,7 @@
 //! may be fixed ground or another moving body. `ContactPoint::normal_impulse` is not this reading:
 //! Avian adds the whole accumulated impulse into it on every solve call, twice per substep, and
 //! keeps the friction impulse only as the last substep's, in a basis it does not store. The
-//! vendored crate is not patched for any of it.
+//! finite-surface hook retains its accumulator convention; this reader owns the reporting.
 //!
 //! WHAT IT HOLDS. The last physics step's points, in Avian's constraint order, until the next step
 //! replaces them, with the step's length and a count of the steps summed. A reader retaining
@@ -718,7 +719,11 @@ fn add_substep(
                 let (normal_now, friction_now) = (point.normal_part.impulse, friction(point));
                 let (normal_before, friction_before) = last[slot];
                 let normal = normal_now - unapplied * normal_before;
-                let tangent = friction_now - unapplied * friction_before;
+                let tangent = if constraint.surface_hook.is_some() {
+                    friction_now
+                } else {
+                    friction_now - unapplied * friction_before
+                };
                 points[slot].impulse +=
                     normal * constraint.normal + tangent.x * tangent1 + tangent.y * tangent2;
                 last[slot] = (normal_now, friction_now);
@@ -755,6 +760,10 @@ fn add_restitution(
     );
 }
 
+/// Prepared contact bindings precede the history snapshot, including custom warm-start semantics.
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PrepareReading;
+
 /// Mount the reading in Avian's solver.
 pub(crate) fn sim_plugin(app: &mut App) {
     app.init_resource::<ContactTransfers>()
@@ -762,6 +771,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
             PhysicsSchedule,
             (
                 keep.in_set(SolverSystems::PreSubstep)
+                    .in_set(PrepareReading)
                     .run_if(not(resource_exists::<ClientReplica>)),
                 add_restitution
                     .after(SolverSystems::Restitution)
@@ -1357,5 +1367,90 @@ mod tests {
             }
         }
         assert_eq!(orders, [false, true].into_iter().collect());
+    }
+    /// Destruction-model load readers need the actual exchange from finite surfaces too. A
+    /// scaled custom warm start updates its accumulator, so subtracting an unapplied share again
+    /// makes the reading disagree with the rigid body's momentum.
+    #[test]
+    fn finite_surface_readback_is_the_momentum_the_solver_moved() {
+        use avian3d::dynamics::solver::{
+            contact::SurfaceFrictionHook,
+            solver_body::{SolverBodies, SurfaceCoordinate, SurfaceSpeed},
+        };
+        #[derive(Component)]
+        struct MovingSurface;
+        fn bind(
+            mut graph: ResMut<ConstraintGraph>,
+            mut bodies: ResMut<SolverBodies>,
+            surfaces: Query<(), With<MovingSurface>>,
+        ) {
+            for row in graph
+                .colors
+                .iter_mut()
+                .flat_map(|color| &mut color.contact_constraints)
+            {
+                for (side, index) in [row.body_index1, row.body_index2].into_iter().enumerate() {
+                    let Some(owner) = bodies.get_entity(index) else {
+                        continue;
+                    }; // Static side.
+                    if !surfaces.contains(owner) {
+                        continue;
+                    } // Ordinary fixture body.
+                    row.surface_coordinates[side] = Some(SurfaceCoordinate {
+                        index: 0,
+                        direction: if side == 0 { -Vec3::Z } else { Vec3::Z },
+                    });
+                    row.surface_hook =
+                        Some(SurfaceFrictionHook(crate::avian_ext::surface_motion::solve));
+                    let body = bodies.get_mut(index).unwrap();
+                    if body.surface_speeds.is_empty() {
+                        // Fixture: one finite surface, initially moving at 1.5 m/s, inertia 500 kg.
+                        body.surface_speeds.push(SurfaceSpeed {
+                            velocity: 1.5,
+                            inverse_inertia: 1.0 / 500.0,
+                            work: 0.0,
+                        });
+                    }
+                }
+            }
+        }
+        for coefficient in [1.0, 0.5] {
+            let mut app = world(coefficient);
+            app.add_systems(
+                PhysicsSchedule,
+                bind.in_set(SolverSystems::PreSubstep)
+                    .after(
+                        avian3d::dynamics::integrator::IntegrationSystems::UpdateVelocityIncrements,
+                    )
+                    .before(keep),
+            );
+            let moving = cube(&mut app, Vec3::new(-0.75, 0.0, 0.0), Vec3::ZERO);
+            app.world_mut()
+                .entity_mut(moving)
+                .insert((MovingSurface, SleepingDisabled));
+            app.update();
+            let fixed = wall(&mut app);
+            // Fixture: a constant 5 kN press; only contact and this force change momentum.
+            let force = Vec3::X * 5000.0;
+            app.world_mut()
+                .entity_mut(moving)
+                .insert(ConstantForce::new(force.x, force.y, force.z));
+            let mut friction_seen = false;
+            for _ in 0..32 {
+                let (change, transferred, dt, _) = step(&mut app, moving, fixed);
+                let applied = force * dt;
+                // Resolution: f32 accumulation through substeps, relative to exchanged momentum.
+                assert!(
+                    (change - applied - transferred).length()
+                        <= 1e-4 * (1.0 + change.length() + applied.length()),
+                    "finite-surface reading {transferred:?} disagrees with momentum {change:?} at warm scale {coefficient}"
+                );
+                friction_seen |= transferred.z.abs() > 1e-3;
+            }
+            assert!(
+                friction_seen,
+                "the fixture must exchange tangential momentum"
+            );
+        }
     }
 }

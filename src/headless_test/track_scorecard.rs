@@ -551,8 +551,7 @@ impl Bed {
             .collect()
     }
 
-    /// Each side's solver contact over the last physics step, read as the drivetrain reads it
-    /// (`stop_contacts::reactions`) against the hull as it stands now.
+    /// The Driver's traction history from the last physics step (`stop_contacts::reactions`).
     fn hard_reactions(&mut self) -> [Option<crate::track::stop_contacts::HardReaction>; 2] {
         use crate::track::stop_contacts::{BeltFace, by_owner, reactions};
         use bevy::ecs::system::RunSystemOnce;
@@ -561,16 +560,12 @@ impl Bed {
             .world_mut()
             .run_system_once(
                 move |transfers: Res<crate::contact_transfer::ContactTransfers>,
-                      faces: Query<(&BeltFace, &ColliderOf)>,
-                      bodies: Query<(&Position, &Rotation)>| {
-                    let (position, rotation) = bodies.get(tank).expect("the tank is a rigid body");
+                      faces: Query<(&BeltFace, &ColliderOf)>| {
                     reactions(
                         by_owner(&transfers, &faces)
                             .get(&tank)
                             .map_or(&[], Vec::as_slice),
                         transfers.dt(),
-                        position.0,
-                        rotation.0,
                         &faces,
                     )
                 },
@@ -3005,15 +3000,10 @@ impl Straddle {
 /// the work of gravity, of the sampled support and of the solver's normal rows, and the most its
 /// engine can do (its greatest torque at its crank limit). The support's work is its forces on the
 /// hull over the hull's mean motion less what each belt paid it: the reaction the drivetrain landed
-/// the belt against (sprocket force less the belt's inertia force), less the solver's bill. Brakes,
-/// clutch and solver friction move energy among hull, belts and crank or spend it. Solver
-/// friction's bill reaches its belt a tick late (`sim::feel_tick`), so each tick charges the belt
-/// its own friction's bill at the belt speed the solver moved the surface at, and returns the bill
-/// it paid. The normal rows' work is booked as the solver did it: whether their push was owed is
-/// [`no_side_slice_bears_a_row_in_its_vacated_band`]'s. Fixture: [`Straddle`], 8 s at full pedal,
-/// long enough to cross the sills in first gear. Fails under a pinch, whose friction the read-back
-/// cannot settle within a tick (#353): `track-contact.md`, the side slices against standing
-/// matter.
+/// the belt against (sprocket work plus same-step solver work, less belt kinetic gain).
+/// Brakes, clutch and finite-surface friction move energy among hull, belts and crank or spend
+/// it. Normal-row work is booked as the solver applied it; the vacated-band witness owns
+/// whether it was owed. Fixture: `Straddle`, eight seconds at full pedal across the sills.
 #[cfg(feature = "bitprobe")]
 #[test]
 fn the_drivetrains_books_close_over_standing_matter() {
@@ -3039,9 +3029,7 @@ fn the_drivetrains_books_close_over_standing_matter() {
             + 0.5 * belt * belts.sides.iter().map(|s| s.speed * s.speed).sum::<f32>()
             + 0.5 * crank * omega * omega
     };
-    // `read`: the solver's bill each belt pays this tick (N); `bill`: its energy at the speeds the
-    // solver ran the belt surfaces at (J).
-    let (mut carried, mut read, mut bill, mut most) = (false, [0.0_f32; 2], 0.0, f32::MIN);
+    let (mut carried, mut most) = (false, f32::MIN);
     for tick in 0..8 * TICKS {
         let bed = &mut straddle.bed;
         let (before, com, held) = (bed.hull(), bed.center_of_mass(), energy(bed));
@@ -3061,8 +3049,7 @@ fn the_drivetrains_books_close_over_standing_matter() {
         let probe = (bed.app.world().get::<TrackGripEffect>(tank))
             .expect("a driving tank")
             .transmission_probe;
-        // Support work (J) is integrated sprocket work less belt kinetic gain and the
-        // previously billed hard reaction's work over the same time-centred belt travel.
+        // Sampled traction work is the belt's input work less its kinetic gain.
         let work = probe.belt_work;
         let paid: f64 = (0..2)
             .map(|i| {
@@ -3070,18 +3057,11 @@ fn the_drivetrains_books_close_over_standing_matter() {
                     f64::from(work.start_speeds[i]),
                     f64::from(probe.next_speeds[i]),
                 );
-                work.sprocket_work_j[i]
-                    - 0.5 * f64::from(belt) * (to * to - from * from)
-                    - f64::from(read[i]) * work.travel_m[i]
+                work.sprocket_work_j[i] - 0.5 * f64::from(belt) * (to * to - from * from)
             })
-            .sum();
-        read = bed
-            .hard_reactions()
-            .map(|hard| hard.map_or(0.0, |hard| hard.belt));
-        let charge = work.conveyor_work_j as f32;
-        let excess =
-            energy(bed) - held - (gravity + support + rows) * DT + paid as f32 - charge + bill;
-        bill = charge;
+            .sum::<f64>()
+            + work.solver_work_j;
+        let excess = energy(bed) - held - (gravity + support + rows) * DT + paid as f32;
         most = most.max(excess);
         carried |= straddle.carried();
         assert!(
@@ -3355,64 +3335,48 @@ fn slab_bed() -> Bed {
     bed
 }
 
-/// The drivetrain reads a loose piece's friction once, with its sign. On a hull carried wholly by
-/// solver contacts, the momentum change along its level heading, where gravity has no part, is
-/// the belts' friction plus the contact normals' push along it: a bump stop meeting the slab can
-/// take a tilted normal. So the readings' total equals the momentum change less that push, read
-/// from the same solver points. A tick's reaction is the solver's friction over the step
-/// before it (`stop_contacts`), so the readings of ticks 1..=N close the steps of ticks 0..N.
-/// A reading lost, doubled or one step out of line moves the balance by that step's friction, up
-/// to its grip limit times the step; the allowance is half the least such limit over the pull's
-/// steps with contact, the solver's Coulomb limit on both belts (`HardReaction::grip`) times the
-/// fixed step, so the balance catches such a fault at any step whose friction exceeds half its
-/// grip, whatever gear the Driver holds. Fixture: a pull short enough to stay on the slab.
+/// The Driver's loose-contact traction ledger must match hull momentum minus the normals'
+/// push. The shipped adapter must report each delivered exchange once, with its sign, while
+/// solver-only support keeps sampled traction absent. Fixture: a one-second pull on a broad slab.
 #[test]
 fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
-    use crate::track::sim::TrackGripEffect;
     let mut bed = slab_bed();
     let start = bed.hull();
     let forward = (start.forward() * Vec3::new(1.0, 0.0, 1.0)).normalize();
-    let (mut impulse, mut magnitude, mut momentum, mut pushed) = (0.0, 0.0, 0.0, 0.0);
+    let (mut impulse, mut magnitude, mut pushed) = (0.0, 0.0, 0.0);
     let mut least_grip = f32::INFINITY;
     let pull = TICKS;
-    for tick in 0..=pull {
-        momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward) - pushed;
+    for tick in 0..pull {
         bed.tick(1.0, 0.0);
         assert!(
             bed.spring_forces().is_empty(),
             "the sampled support carried the hull at tick {tick}"
         );
-        if tick < pull {
-            pushed += bed
-                .tank_solver_forces()
-                .iter()
-                .map(|(force, normal)| force.force.dot(*normal) * normal.dot(forward) * DT)
-                .sum::<f32>();
-            // A step with no solver contact moves no friction, so no fault there can move the
-            // balance; a side without one has no grip over the step.
-            let sides = bed.hard_reactions();
-            if sides.iter().any(Option::is_some) {
-                least_grip = least_grip.min(sides.iter().flatten().map(|side| side.grip).sum());
-            }
-        }
-        let effect = bed
-            .app
-            .world()
-            .get::<TrackGripEffect>(bed.tank)
-            .expect("a driven tank publishes its belt reaction");
-        if tick > 0 {
-            // Tick 0 reads the settle's last step.
-            let step = (effect.belt_reaction[0] + effect.belt_reaction[1]) * DT;
-            impulse += step;
-            magnitude += step.abs();
-        }
+        pushed += bed
+            .tank_solver_forces()
+            .iter()
+            .map(|(force, normal)| force.force.dot(*normal) * normal.dot(forward) * DT)
+            .sum::<f32>();
+        let sides = bed.hard_reactions();
+        if sides.iter().any(Option::is_some) {
+            least_grip = least_grip.min(sides.iter().flatten().map(|side| side.grip).sum());
+        } // A step without contact transfers no friction.
+        let step = sides
+            .iter()
+            .flatten()
+            .map(|side| side.friction.dot(forward))
+            .sum::<f32>()
+            * DT;
+        impulse += step;
+        magnitude += step.abs();
     }
+    let momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward) - pushed;
     let allowance = 0.5 * least_grip * DT;
-    // DERIVED: each f32 addition errs by at most ε of a partial sum, which is under `magnitude`.
+    // DERIVED: each f32 addition errs by at most epsilon of a partial sum, below `magnitude`.
     let rounding = f32::EPSILON * pull as f32 * magnitude;
     println!(
-        "MEASURED belt impulse {impulse} N s, hull momentum change less the normals' push \
-         {momentum} N s, the push {pushed} N s, allowance {allowance} N s"
+        "MEASURED contact friction {impulse} N s, hull momentum less normals {momentum} N s, \
+         normal push {pushed} N s, allowance {allowance} N s"
     );
     assert!(
         rounding < allowance,
@@ -3420,12 +3384,11 @@ fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
     );
     assert!(
         momentum.abs() > allowance,
-        "the pull's {momentum} N s is within the allowance {allowance} N s: a lost or negated \
-         reading would close"
+        "the pull must exceed the allowance to detect a lost or negated reading"
     );
     assert!(
         (impulse - momentum).abs() < allowance,
-        "belts {impulse} N s against hull {momentum} N s, allowance {allowance} N s"
+        "friction {impulse} N s against hull {momentum} N s, allowance {allowance} N s"
     );
 }
 

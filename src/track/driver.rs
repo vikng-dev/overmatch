@@ -757,7 +757,6 @@ mod tests {
                 speed += (push - resist(push)) / MASS * DT;
                 reported = [
                     Some(HardReaction {
-                        belt: push * 0.25,
                         friction: FORWARD * push * 0.25,
                         grip: f32::INFINITY, // Fixture: ground that grips beyond any push.
                     }),
@@ -1670,7 +1669,6 @@ mod tests {
                 let mut inp = input(1.0, 0.0, [0.0; 2], pushed);
                 let hard = pushed.map(|push| {
                     Some(HardReaction {
-                        belt: push,
                         friction: FORWARD * push,
                         grip: f32::INFINITY, // Fixture: an obstacle gripping beyond any gear's pull.
                     })

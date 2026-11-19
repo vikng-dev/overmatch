@@ -261,8 +261,8 @@ pub(crate) struct ElementOutputProbe {
 pub(crate) struct BeltWorkProbe {
     pub start_speeds: [f32; 2],
     pub sprocket_work_j: [f64; 2],
-    /// Solver friction charged at each substep's surface velocity (J).
-    pub conveyor_work_j: f64,
+    /// Work transferred to the finite belts by solver friction in the same substep (J).
+    pub solver_work_j: f64,
     /// Time-centred travel for force work, distinct from explicit phase advection.
     pub travel_m: [f64; 2],
 }
