@@ -26,6 +26,8 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
+| view-24 | P3 | `src/construction/view/relief.rs::Outline::triangles` | base-truths: Missing law | A face beside a break whose drawn outline folds (an edge of 5–10 mm beside 2 cm of relief) keeps its law triangles and turns one away: 45 of 186,512 such triangles over every single-chunk break of the shipped house, in 21 faces, 20 of them between standing chunks (MEASURED). | Pull a narrow face's moved points onto its own outline, or fade the relief by the width of the faces beside a rim. | ratchet |
+| view-25 | P3 | `src/construction/view.rs::crack_mesh` | base-truths: Missing law | A crack strip ending at a break's rim ends at its law corner while the rim's drawn corner moved up to 2 cm in the hull plane, so the strip overshoots into the hole or stops short of it. | Draw a strip's ends through `Relief::warp` where its chunk moved them. | ratchet |
 
 
 ## dev
@@ -41,6 +43,7 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
+| destruction-12 | P3 | `src/construction/breakage.rs::contact_collider` | base-truths: Missing law | Setting a joint face back `LOOSE_GAP_M` moves a wedge's tip by `LOOSE_GAP_M / sin(θ/2)` (DERIVED): 47 mm on a 2.4° timber shard of the experiment's bake (timber cells are unchanged), a tip no collider holds. | Cut no cell sharper than the set-back allows (as the planar cut drops slivers), or set back the tip's faces by their share. | ratchet |
 
 ## ballistics
 
