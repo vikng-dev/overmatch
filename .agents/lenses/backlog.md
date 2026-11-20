@@ -49,3 +49,10 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | ballistics-24 | P3 | `.agents/scratch/research/walk-panics-2026-11-03.md` Reach | base-truths: Claim beyond the evidence | "No flight that did not panic changed": runs go unpaired after a panic, and agreement omits a changed `SampleSeed.t`, which `sitting_reach` reads. | Pair flights by seed, compare `t`, or narrow the claim. | ratchet |
 
 | ballistics-30 | P3 | `assets/ballistics/spall_cone.ron::cone_emitted_hp_per_joule` | base-truths: Retrospective calibration | The unit is set against a retired reference cone of 395 HP, a target with no remaining owner. | State the crew-station outcome it aims at as a balance decision, or replace it with the fragment-hit law it names. | ratchet |
+
+## driving
+
+| id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
+|---|---|---|---|---|---|---|
+| driving-18 | P3 | `src/track/block.rs::solve_limited` | error-handling: Late check | The search's `expect` needs the optimal face's pivots to clear the rank threshold in the loaded metric, but admission (`check_row_conditioning`) certifies only the unloaded one and no authored bound caps reaction slopes; no reaching input is known. | Bound reaction slopes in data and certify the loaded metric at admission, or prove the optimal face always resolves. | ratchet |
+| driving-19 | P3 | `src/headless_test/track_scorecard.rs::slope_hold` | testing: Wrong oracle | Sand's above-limit row demands positive window travel while its own acceleration bound is negative (-0.58139 m/s²: rolling resistance exceeds the static excess), so a tank the law lets rest fails it, on `main` as on the lane. | Demand travel only where gravity exceeds static holding plus rolling resistance, as `contact_law_brakes_capture_below_moving_limits_and_move_above_total_resistance` does. | ratchet |

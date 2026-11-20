@@ -93,10 +93,10 @@ downhill. Relax-only friction fails the holding travel invariant even with final
 **Contact cost.** Run the ignored
 `headless_test::track_scorecard::constrained_belt_relax_cost_with_two_workers` test alone with
 `scripts/serial-cargo test --release --lib --features dev_ui,bitprobe`, then
-`-- --ignored --nocapture --test-threads=1`. The probe installs two compute workers and pulls
-one or eight independent tanks at full throttle for two seconds after settling, on broad slabs
-or separated loose pieces. Pass costs include normal and ordinary contact rows, normalized by
-belt-face point visits in that pass. Tick time includes the whole headless app update and its
+`-- --ignored --nocapture --test-threads=1`. The probe installs two compute workers, which
+`TaskPool::scope` joins with its calling thread, and pulls one or eight independent tanks at full
+throttle for two seconds after settling, on broad slabs or separated loose pieces. Pass costs
+include normal and ordinary contact rows, normalized by belt-face point visits in that pass. Tick time includes the whole headless app update and its
 fixture bookkeeping. This is local release pricing, not a measurement on the hosted machine.
 
 MEASURED 2026-11-20 on the local Apple M4, Low Power Mode off, no compile running. Both builds
@@ -116,10 +116,12 @@ them read 0.250 ms/tick on debris and 0.407 on slab with eight tanks (MEASURED),
 without `bitprobe` widens each gap by that much. A sampling profile of the debris, eight-tank
 cell splits the friction hook's samples into the disk step (34%), the owner's face step with its
 exact re-snap (43%), searches at face changes (10%) and the rigid metric (9%) (MEASURED).
-Exact-zero owner pushes reuse an already-certified solution. Rows sharing a hull require
-sequential effects; independent owners inherit Avian 0.8.0's graph-colour dispatch, including
-its 64-constraint serial floor. The table prices that dispatch rather than assuming two workers
-parallelize it.
+Rows sharing a hull require sequential effects; independent owners inherit Avian 0.8.0's
+graph-colour dispatch, including its 64-constraint serial floor. The table prices that dispatch
+on this machine rather than assuming two workers parallelize it. Unpriced: the hosted two-core
+allocation, where the caller and two workers share two vCPUs; populations above eight tanks (the
+hosted server has run 30); and a rubble-heavy scene with few tanks, where the per-contact and
+per-body storage the fork adds is paid by every contact and body.
 
 **Capped-row visits (MEASURED 2026-11-20).** Temporary counters at `ContactMetric::minimum`
 entry and its third step counted both normal passes, excluding warm application. On a broad
@@ -136,9 +138,6 @@ static slab, after one second settling, twelve-second runs gave:
 8/893052 on rubble and 0/199860 in the yard. Its highest individual line was slope:
 4/33312 (0.0120%, DERIVED), below the owner's 0.1% limit. The six `belt_friction_probe` cases
 (slab, pieces and house debris; pull and pivot) counted 0/2483460. No counter ships.
-An exact-zero owner push reuses its already-certified totals. Native energy grids, all rigid
-and parked slab readings, the complete scorecard JSON and every visit count matched the
-pre-elision row byte-for-byte in a one-time comparison (MEASURED).
 The native passive grid runs each cell on the shipped exits and again with every visit forced to
 the second exit. In both, all 60 at-rest cells finished at or below 1.2e-27 J (13 exactly zero),
 and all 120 moving cells below their frictionless reference (MEASURED 2026-11-20). Forcing the
@@ -177,7 +176,7 @@ cannot show (`track::sim::apply_track_forces`), and one that finds the tank not 
 its timer (`track::sim::commit_drivetrains`): drive demand, a belt its brake does not hold, a brake meeting a
 stop beyond its capacity, every gripping patch at or past its budget, or a sampled support whose
 body is not static. A tank creeping past its grip limit keeps creeping:
-`contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits` judges the
+`contact_law_brakes_capture_below_moving_limits_and_move_above_total_resistance` judges the
 slope limits under production rest, mud at 17.0° against its 15.5° limit among them. A tank
 never rests on a support that can move by itself, another tank's hull among them, an admitted
 limit: Avian links bodies into an island only through solver contacts and joints
@@ -300,10 +299,11 @@ Known differences between the channels, none tuned:
   headings by three offsets, no run of 48 takes energy from the contact, nor any of the three from
   6 m that did; the fastest hull drives at 8.7 m/s and the largest point impulse on the tank is
   0.13 MN·s. With the exposed-face admission alone 8 of 48 did, the worst leaving at 165 m/s, and
-  before it 17 of 48, the worst at 319 m/s. With the read-back off, the exposed-face admission alone
-  still took energy in some tick of 7 of 12 such runs, up to 1.1 MJ, the worst tick's work mostly
-  the pinch's normal rows; with the band, none of the 12 did (MEASURED 2026-11-15, 57 t fixture
-  hull). What remains:
+  before it 17 of 48, the worst at 319 m/s. With the read-back off (the next tick's belt load from
+  delivered solver friction, since replaced by the in-solve exchange), the exposed-face admission
+  alone still took energy in some tick of 7 of 12 such runs, up to 1.1 MJ, the worst tick's work
+  mostly the pinch's normal rows; with the band, none of the 12 did (MEASURED 2026-11-15, 57 t
+  fixture hull). What remains:
   - *Breakaway per search.* Decide each static row's breakaway once per interval from the
     complete totals after the biased pass, kinetic through relaxation; the second exit only caps.
   - *One normal per convex pair* (#378). A slice still meets matter beside the shoe with its pair's
