@@ -24,7 +24,6 @@ pub mod geom;
 pub mod house;
 pub mod spec;
 
-use fracture::CutCount;
 use spec::{Construction, ConstructionSpec, House};
 
 /// The specs' folder, under the repository root.
@@ -35,12 +34,6 @@ pub const HOUSE_SUFFIX: &str = ".house.ron";
 
 /// An explicit construction's file suffix ([`ConstructionSpec`]).
 pub const PIECES_SUFFIX: &str = ".pieces.ron";
-
-/// One bake's output and what its cut rule did.
-pub struct Baked {
-    pub asset: ConstructionAsset,
-    pub cuts: CutCount,
-}
 
 /// How far a piece's or a chunk's corner may sit off its face's plane, m (Resolution: the writer
 /// rounds every coordinate to a micrometre, so a corner nearer its plane than that is on it in the
@@ -65,14 +58,13 @@ fn canon3(v: DVec3) -> [f32; 3] {
 pub fn bake(
     construction: &Construction,
     density: impl Fn(&str) -> Result<f64, String>,
-) -> Result<Baked, String> {
-    let mut cuts = CutCount::default();
+) -> Result<ConstructionAsset, String> {
     let cut = construction
         .pieces
         .iter()
-        .map(|piece| fracture::chunks(piece, &construction.id, &mut cuts))
-        .collect();
-    assemble(construction, cut, density, cuts)
+        .map(|piece| fracture::chunks(piece, &construction.id))
+        .collect::<Result<_, _>>()?;
+    assemble(construction, cut, density)
 }
 
 /// The construction `cut` makes of `construction` (one run of chunks per piece, in order), certified
@@ -81,8 +73,7 @@ fn assemble(
     construction: &Construction,
     cut: Vec<Vec<geom::Polyhedron>>,
     density: impl Fn(&str) -> Result<f64, String>,
-    cuts: CutCount,
-) -> Result<Baked, String> {
+) -> Result<ConstructionAsset, String> {
     let pieces = &construction.pieces;
     let densities = pieces
         .iter()
@@ -203,7 +194,7 @@ fn assemble(
     };
     asset.check()?;
     certify::graph(construction, &cut, &asset)?;
-    Ok(Baked { asset, cuts })
+    Ok(asset)
 }
 
 /// The attachment kinds the joins and foundation name, each once, in name order.
@@ -284,7 +275,7 @@ pub fn admitted(asset: &ConstructionAsset, spec: &str) -> Result<String, String>
 
 /// One admitted bake written under the caller's output root.
 pub struct Written {
-    pub baked: Baked,
+    pub asset: ConstructionAsset,
     pub bytes: usize,
     pub unchanged: bool,
 }
@@ -334,9 +325,9 @@ impl std::error::Error for BakeError {
 /// Bake, admit the serialized output through the game's gate, then write changed bytes only.
 /// Admission precedes every filesystem mutation, so a refused spec creates no output directory.
 pub fn bake_to(root: &Path, spec: &Spec) -> Result<Written, BakeError> {
-    let baked = bake(&spec.construction, schema::substance_density)
+    let asset = bake(&spec.construction, schema::substance_density)
         .map_err(|err| BakeError::Admission(format!("{}: {err}", spec.path)))?;
-    let text = admitted(&baked.asset, &spec.path).map_err(BakeError::Admission)?;
+    let text = admitted(&asset, &spec.path).map_err(BakeError::Admission)?;
     let path = asset_path(root, &spec.construction.id);
     let unchanged = match std::fs::read_to_string(&path) {
         Ok(old) => old == text,
@@ -364,7 +355,7 @@ pub fn bake_to(root: &Path, spec: &Spec) -> Result<Written, BakeError> {
         })?;
     }
     Ok(Written {
-        baked,
+        asset,
         bytes: text.len(),
         unchanged,
     })

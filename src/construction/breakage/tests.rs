@@ -2775,41 +2775,29 @@ fn casing_loads_count_each_joule_once_and_carry_their_ejection_momentum() {
     }
 }
 
-/// ASSUMED geometry fixture selected by class: three collinear neighbours in one element,
-/// sharing two seams and a common extrusion. The data supplies every hull and mass.
+/// ASSUMED geometry fixture selected by class: three neighbours in one element, a chain joined by
+/// two seams, the ends not touching. The data supplies every hull and mass.
 fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
     let mut kind = (*shipped_house()).clone();
     let structure = kind.layout.structure(&kind.asset);
-    let adjacent = |a: usize, b: usize| {
-        kind.layout.element_of[a] == kind.layout.element_of[b]
-            && (structure.chunks[a].centroid.y - structure.chunks[b].centroid.y).abs() < 0.001
-            && !structure.chunks[a].buried
-            && !structure.chunks[b].buried
+    let joined = |a: usize, b: usize| {
+        structure.joints.iter().any(|joint| {
+            joint.b == Side::Chunk(b) && joint.a == a || joint.b == Side::Chunk(a) && joint.a == b
+        })
     };
-    let mut chosen = None;
-    for joint in &structure.joints {
-        let Side::Chunk(b) = joint.b else {
-            continue;
-        };
-        if !adjacent(joint.a, b) || joint.normal.z.abs() < 0.999 {
-            continue;
-        }
-        for other in &structure.joints {
-            let Side::Chunk(c) = other.b else {
-                continue;
-            };
-            if other.a != b || c == joint.a || !adjacent(b, c) || other.normal.z.abs() < 0.999 {
-                continue;
-            }
-            let mut group = vec![joint.a, b, c];
-            group.sort_unstable();
-            chosen = Some(group);
-            break;
-        }
-        if chosen.is_some() {
-            break;
-        }
-    }
+    let open = |c: usize| !structure.chunks[c].buried;
+    let chosen = (0..structure.chunks.len()).find_map(|b| {
+        let e = kind.layout.element_of[b];
+        let mut ends = kind
+            .layout
+            .chunks_of(usize::from(e))
+            .filter(|&c| c != b && open(c) && joined(b, c));
+        let a = ends.next()?;
+        let c = ends.find(|&c| !joined(a, c))?;
+        let mut group = vec![a, b, c];
+        group.sort_unstable();
+        open(b).then_some(group)
+    });
     let group = chosen.expect("the fixture asset contains a row of three chunks");
     let mut internal = 0;
     for joint in &mut kind.layout.joints {
@@ -3067,7 +3055,10 @@ fn split_children_inherit_the_parents_rigid_momentum() {
             + 0.5 * spin.0.dot(inertia * spin.0);
     }
     assert!((sum_p - momentum).length() <= 1e-4 * momentum.length());
-    assert!((sum_l - angular).length() <= 1e-4 * angular.length());
+    // Resolution: each child's lever `at − centre` is a difference of f32 positions near the root,
+    // each off by up to an ulp of the root's distance (DERIVED), times the momentum it carries.
+    let levers = 2.0 * f32::EPSILON * root.translation.length() * momentum.length();
+    assert!((sum_l - angular).length() <= 1e-4 * angular.length() + levers);
     assert!((sum_e - energy).abs() <= 1e-4 * energy);
     assert!((sum_mass - total_mass).abs() < 1e-5 * total_mass);
 }
@@ -3805,7 +3796,8 @@ fn a_freed_chunk_moves_as_the_material_it_occupies() {
         );
     }
     let (_, [c, other, _]) = fixture_chunks(&kind);
-    let (mut app, (mass, inertia, centre)) = freed_in_place(&[c, other], Vec3::ZERO);
+    let (mut app, (mass, inertia, centre)) =
+        freed_in_place(&[c.min(other), c.max(other)], Vec3::ZERO);
     app.update();
     let mut bodies = app.world_mut().query_filtered::<(
         &ComputedMass,

@@ -387,33 +387,6 @@ impl Polyhedron {
             })
     }
 
-    /// The extent along `axis` of the section on the plane `normal · p = offset`: `None` where
-    /// the plane misses the solid.
-    pub fn section_extent(&self, normal: DVec3, offset: f64, axis: DVec3) -> Option<(f64, f64)> {
-        let mut span: Option<(f64, f64)> = None;
-        let mut take = |p: DVec3| {
-            let x = axis.dot(p);
-            span = Some(span.map_or((x, x), |(lo, hi)| (lo.min(x), hi.max(x))));
-        };
-        for face in &self.faces {
-            let m = face.corners.len();
-            for k in 0..m {
-                let (p, q) = (
-                    self.corners[face.corners[k]],
-                    self.corners[face.corners[(k + 1) % m]],
-                );
-                let (sp, sq) = (normal.dot(p) - offset, normal.dot(q) - offset);
-                if sp == 0.0 {
-                    take(p);
-                }
-                if (sp < 0.0 && sq > 0.0) || (sp > 0.0 && sq < 0.0) {
-                    take(p + (q - p) * (sp / (sp - sq)));
-                }
-            }
-        }
-        span
-    }
-
     /// The axis-aligned bounds, `(min, max)`.
     pub fn bounds(&self) -> (DVec3, DVec3) {
         self.corners.iter().fold(

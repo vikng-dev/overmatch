@@ -13,9 +13,8 @@ House(
     // One brick's length: a one-brick wall.
     wall_thickness_m: 0.25,
     // GOST 530 single-format brick, 250 × 120 × 65 mm, laid in 10 mm joints: a course is 65 + 10
-    // mm, a stretcher's module along the face 250 + 10 mm.
+    // mm.
     course_m: 0.075,
-    module_m: 0.26,
     foundation_courses: 6,
     // ASSUMED construction: the foundation is bedded with the same mortar as the walls.
     foundation_attachment: "mortared",
@@ -43,16 +42,16 @@ House(
         walls: (
             material: "Brick",
             surface_frame: Upright,
-            // Running bond in this house's `course_m` and `module_m`.
-            cut: Courses((
-                row_courses: (3, Resolution("chunk rows three courses tall: about a hand's
-                    height of brick per chunk, the size a breach reads at")),
-                crack_chance: (0.2, Taste("masonry break edges: one cut in five leaves its head
-                    joint for a crack through the bricks")),
-                crack_shift_m: (0.09, Taste("masonry break edges: how far a crack's ends wander
-                    off their joint")),
-                min_width_m: (0.08, Resolution("no chunk narrower than about a third of a brick
-                    at a row's top or bottom: no sliver hulls")),
+            // On an unbounded wall a chunk's mean face is pitch_m² / keep_share; the walls' edges
+            // and openings shift the baked mix.
+            cut: Planar((
+                pitch_m: (0.21, Resolution("the masonry chunk size the laws read a breach at: a
+                    mean brick chunk of 13.5 L, as a running-bond cut in three-course rows baked
+                    this house (MEASURED, 994 chunks); a 0.26 m pitch baked 21.2 L (MEASURED, 631
+                    chunks) and the mean scales with pitch_m², so 0.26 × √(13.5 / 21.2) = 0.21
+                    (DERIVED)")),
+                keep_share: (0.82, Taste("masonry break look: most sites kept for many medium
+                    lumps, a few dropped for a few large ones")),
             )),
         ),
         plates: (

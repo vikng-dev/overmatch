@@ -9,14 +9,14 @@ use super::spec::Piece;
 use super::*;
 
 /// The shipped specs, baked once per test against the shipped registry.
-fn shipped() -> Vec<(Spec, Baked)> {
+fn shipped() -> Vec<(Spec, ConstructionAsset)> {
     specs(&crate::repo_root())
         .expect("the shipped specs parse")
         .into_iter()
         .map(|spec| {
-            let baked = bake(&spec.construction, schema::substance_density)
+            let asset = bake(&spec.construction, schema::substance_density)
                 .unwrap_or_else(|err| panic!("{}: {err}", spec.path));
-            (spec, baked)
+            (spec, asset)
         })
         .collect()
 }
@@ -29,18 +29,14 @@ fn shipped() -> Vec<(Spec, Baked)> {
 #[test]
 fn two_bakes_write_the_same_bytes_and_the_shipped_file_is_one() {
     let root = crate::repo_root();
-    for (spec, baked) in shipped() {
+    for (spec, asset) in shipped() {
         let id = &spec.construction.id;
-        let text = write(&baked.asset, &spec.path);
+        let text = write(&asset, &spec.path);
         let again = bake(&spec.construction, schema::substance_density).unwrap();
-        assert_eq!(
-            text,
-            write(&again.asset, &spec.path),
-            "{id}: two bakes differ"
-        );
+        assert_eq!(text, write(&again, &spec.path), "{id}: two bakes differ");
         assert_eq!(
             ConstructionAsset::from_ron(&text).as_ref(),
-            Ok(&baked.asset),
+            Ok(&asset),
             "{id}: the text reads back as written",
         );
         let path = asset_path(&root, id);
@@ -62,8 +58,8 @@ fn two_bakes_write_the_same_bytes_and_the_shipped_file_is_one() {
 /// mid-air.
 #[test]
 fn every_chunk_is_joined_to_the_ground_and_anchors_lie_on_the_foundation() {
-    for (spec, baked) in shipped() {
-        let asset = &baked.asset;
+    for (spec, asset) in shipped() {
+        let asset = &asset;
         let id = &spec.construction.id;
         let n = asset.chunks.len();
         assert!(!asset.anchors.is_empty(), "{id}: no anchor");
@@ -115,12 +111,11 @@ fn every_chunk_is_joined_to_the_ground_and_anchors_lie_on_the_foundation() {
 /// written chunk corner lies inside its own piece, on or under each of the piece's face planes.
 /// The baker relies on conservation of the authored volume, and a roof's users on a board's cut
 /// staying within that board. Mutant: a cut that reaches across a piece's face into the next board
-/// fails, though a box test admits it wherever two boards' bounds overlap. Controlled course
-/// fixtures separately check that head joints split each row.
+/// fails, though a box test admits it wherever two boards' bounds overlap.
 #[test]
 fn the_chunks_tile_each_element() {
-    for (spec, baked) in shipped() {
-        let asset = &baked.asset;
+    for (spec, asset) in shipped() {
+        let asset = &asset;
         let id = &spec.construction.id;
         for (element, piece) in asset.elements.iter().zip(&spec.construction.pieces) {
             let [first, end] = element.chunks;
@@ -160,8 +155,8 @@ fn the_chunks_tile_each_element() {
 /// faces fails here.
 #[test]
 fn every_interface_is_one_contact() {
-    for (spec, baked) in shipped() {
-        let asset = &baked.asset;
+    for (spec, asset) in shipped() {
+        let asset = &asset;
         let id = &spec.construction.id;
         let mut inner = vec![0.0; asset.chunks.len()];
         let mut outer = vec![0.0; asset.chunks.len()];
@@ -179,7 +174,7 @@ fn every_interface_is_one_contact() {
             .construction
             .pieces
             .iter()
-            .flat_map(|piece| fracture::chunks(piece, id, &mut CutCount::default()))
+            .flat_map(|piece| fracture::chunks(piece, id).unwrap())
             .collect();
         assert_eq!(solids.len(), asset.chunks.len(), "{id}: the bake's chunks");
         for (c, solid) in solids.iter().enumerate() {
@@ -289,13 +284,12 @@ fn each_roof_board_is_its_own_piece_and_component() {
 /// choice is a fixture's.
 const FIXTURE_HOUSE: &str = r#"House(
     id: "fixture", width_m: 4.0, length_m: 6.0, wall_thickness_m: 0.25,
-    course_m: 0.1, module_m: 0.3, foundation_courses: 1, foundation_attachment: "mortared",
+    course_m: 0.1, foundation_courses: 1, foundation_attachment: "mortared",
     eaves_course: 20, pitch: (3, 4), plate_height_m: 0.1, board_width_m: 0.2,
     board_thickness_m: 0.05, boards_per_slope: 14, gable_overhang_m: 0.3,
     parts: (
-        walls: (material: "Brick", surface_frame: Upright, cut: Courses((
-            row_courses: (3, Fixture("fixture")), crack_chance: (0.2, Fixture("fixture")),
-            crack_shift_m: (0.09, Fixture("fixture")), min_width_m: (0.06, Fixture("fixture")),
+        walls: (material: "Brick", surface_frame: Upright, cut: Planar((
+            pitch_m: (0.3, Fixture("fixture")), keep_share: (0.8, Fixture("fixture")),
         ))),
         plates: (material: "Wood", surface_frame: Grain((0.0, 0.0, 1.0)), cut: Cells((
             size_m: (0.25, Fixture("fixture")), stretch: (4.0, Fixture("fixture")),
@@ -319,11 +313,14 @@ fn fixture_house() -> House {
     House::from_ron(FIXTURE_HOUSE).expect("the constructed fixture states a house")
 }
 
-/// FIXTURE DATA: a running bond with straight head joints.
-const FIXTURE_COURSES: &str = "Courses((origin: (0.0, 0.0, 0.0), along: (1.0, 0.0, 0.0), up: (0.0, 1.0, 0.0), \
-         course_m: 0.075, module_m: 0.26, rule: (row_courses: (3, Fixture(\"fixture\")), \
-         crack_chance: (0.0, Fixture(\"fixture\")), crack_shift_m: (0.05, Fixture(\"fixture\")), \
-         min_width_m: (0.08, Fixture(\"fixture\")))))";
+/// FIXTURE DATA: a planar cut through `depth`, sites `pitch_m` apart, every one kept.
+fn planar(depth: DVec3, pitch_m: f64) -> String {
+    format!(
+        "Planar((depth: ({:?}, {:?}, {:?}), rule: (pitch_m: ({pitch_m:?}, Fixture(\"fixture\")), \
+         keep_share: (1.0, Fixture(\"fixture\")))))",
+        depth.x, depth.y, depth.z
+    )
+}
 
 /// FIXTURE DATA: a stretched-cell cut, `size_m` across the grain.
 fn cells(size_m: f64, stretch: f64) -> String {
@@ -396,7 +393,7 @@ fn with_clinker(name: &str) -> Result<f64, String> {
 /// a hard-coded material, or picks a piece's pattern from its material fails.
 #[test]
 fn an_additional_material_bakes_from_data_alone() {
-    let courses = FIXTURE_COURSES;
+    let planar = planar(DVec3::Z, 0.3);
     let grain = "Grain((1.0, 0.0, 0.0))";
     let text = |block: &str, beam: &str| {
         construction(
@@ -425,9 +422,7 @@ fn an_additional_material_bakes_from_data_alone() {
     };
     let counts = |block: &str, beam: &str| {
         let built = ConstructionSpec::from_ron(&text(block, beam)).unwrap();
-        let asset = bake(&built, with_clinker)
-            .expect("a new material bakes")
-            .asset;
+        let asset = bake(&built, with_clinker).expect("a new material bakes");
         assert_eq!(asset.materials, [CLINKER.0, "Wood"]);
         for chunk in &asset.chunks {
             let material = &asset.materials[usize::from(chunk.material)];
@@ -446,10 +441,10 @@ fn an_additional_material_bakes_from_data_alone() {
             .collect::<Vec<_>>()
     };
     let striped = cells(0.1, 3.0);
-    let [block, beam] = counts(courses, "Whole")[..] else {
+    let [block, beam] = counts(&planar, "Whole")[..] else {
         unreachable!("two pieces")
     };
-    assert!(block > 1, "the courses cut the block");
+    assert!(block > 1, "the planar cut cuts the block");
     assert_eq!(beam, 1, "the beam is whole");
     let [block, beam] = counts("Whole", &striped)[..] else {
         unreachable!("two pieces")
@@ -457,7 +452,7 @@ fn an_additional_material_bakes_from_data_alone() {
     assert_eq!(block, 1, "the block is whole");
     assert!(beam > 1, "the cells cut the beam");
     let err = bake(
-        &ConstructionSpec::from_ron(&text(courses, "Whole")).unwrap(),
+        &ConstructionSpec::from_ron(&text(&planar, "Whole")).unwrap(),
         schema::substance_density,
     )
     .map(|_| ())
@@ -501,7 +496,7 @@ fn cells_partition_their_piece() {
             hi,
             &cells(0.2, 3.0),
         ));
-        let cut = fracture::chunks(&piece, "fixture", &mut CutCount::default());
+        let cut = fracture::chunks(&piece, "fixture").unwrap();
         assert!(cut.len() > 1, "{frame}: the fixture is split into cells");
         let volume: f64 = cut.iter().map(Polyhedron::volume).sum();
         assert!(
@@ -538,6 +533,76 @@ fn cells_partition_their_piece() {
     }
 }
 
+/// A PLANAR CUT RUNS THROUGH THE WHOLE DEPTH AND LEAVES NO SLIVER: on a slab whose depth runs off
+/// every axis, the chunks sum to the slab, each chunk's every face is the slab's own or parallel to
+/// the depth, and no chunk holds two corners nearer than [`fracture::SLIVER_M`]. The view draws a
+/// break across the wall's thickness and the contact hull stands each joint face a millimetre
+/// back; a cut ending inside the wall, or a sliver the set-back swallows, breaks both, and a slab
+/// thinner than a sliver is refused rather than baked whole. Mutants: sites off the mid-depth
+/// plane, no sliver drop, or no refusal fail here. Fixture: a 1.2 × 0.9 m slab 0.25 m deep, sites
+/// 0.06 m apart.
+#[test]
+fn a_planar_cut_runs_through_the_depth_and_leaves_no_sliver() {
+    let depth = DVec3::new(1.0, 0.3, 2.0).normalize();
+    let mut piece = lone(box_piece(
+        "slab",
+        "Pier",
+        "Brick",
+        "Upright",
+        DVec3::ZERO,
+        DVec3::ONE,
+        &planar(depth, 0.06),
+    ));
+    let (u, v) = geom::plane_basis(depth);
+    let slab = |far: f64| {
+        geom::Prism {
+            frame: geom::Frame {
+                origin: DVec3::ZERO,
+                u,
+                v,
+            },
+            profile: [(0.0, 0.0), (1.2, 0.0), (1.2, 0.9), (0.0, 0.9)]
+                .map(|(x, y)| glam::DVec2::new(x, y))
+                .to_vec(),
+            near: 0.0,
+            far,
+        }
+        .solid()
+    };
+    piece.solid = slab(0.5 * fracture::SLIVER_M);
+    let err = fracture::chunks(&piece, "fixture").unwrap_err();
+    assert!(err.contains("slab") && err.contains("Whole"), "{err}");
+    piece.solid = slab(0.25);
+    let slab = &piece.solid;
+    let cut = fracture::chunks(&piece, "fixture").unwrap();
+    assert!(cut.len() > 1, "the fixture is cut");
+    let volume: f64 = cut.iter().map(Polyhedron::volume).sum();
+    assert!((volume - slab.volume()).abs() < 1e-9 * volume, "{volume}");
+    let on_slab = |face: &Face| {
+        slab.faces().iter().any(|side| {
+            side.normal.dot(face.normal) > 1.0 - 1e-12 && (side.offset - face.offset).abs() < 1e-9
+        })
+    };
+    for (k, chunk) in cut.iter().enumerate() {
+        chunk.certify(PLANE_M).unwrap();
+        for face in chunk.faces() {
+            assert!(
+                on_slab(&face) || face.normal.dot(depth).abs() < 1e-9,
+                "chunk {k}: a face {} ends inside the depth",
+                face.normal
+            );
+        }
+        for (i, p) in chunk.corners.iter().enumerate() {
+            for q in &chunk.corners[i + 1..] {
+                assert!(
+                    p.distance(*q) >= fracture::SLIVER_M,
+                    "chunk {k}: corners {p} and {q} bound a sliver"
+                );
+            }
+        }
+    }
+}
+
 /// THE GRAIN AXIS IS THE SURFACE FRAME'S: an authored grain is its own unit direction, and an
 /// upright frame's axis is the construction's up. The cutter and the view read one grain fact.
 #[test]
@@ -554,8 +619,8 @@ fn the_grain_axis_is_the_surface_frames() {
 /// FASTENING FOLLOWS THE JOINS, NEVER THE PATTERN: whichever pattern cuts the walls and the roof,
 /// every joint between components is held by the kind its join names, and inside a component by
 /// the seam. The fixture's joins name kinds a pattern would not suggest (a nailed wall, a
-/// mortared roof). Mutant: a bake that reads mortar from courses, nails from boards or cells,
-/// fails.
+/// mortared roof). Mutant: a bake that reads mortar from a planar cut, nails from boards or
+/// cells, fails.
 #[test]
 fn fastening_follows_the_joins_never_the_pattern() {
     use super::spec::PartCut;
@@ -581,7 +646,7 @@ fn fastening_follows_the_joins_never_the_pattern() {
             join.by = rotate(&join.by).to_owned();
         }
         let built = house::construction(&house).unwrap();
-        let asset = bake(&built, schema::substance_density).unwrap().asset;
+        let asset = bake(&built, schema::substance_density).unwrap();
         assert_bond_kinds(&built, &asset);
     }
 }
@@ -675,30 +740,6 @@ fn an_authored_piece_that_is_no_convex_solid_is_refused() {
     }
 }
 
-/// Construction authors rely on crack_chance selecting cracks: zero never cracks, and a positive
-/// chance produces cracks where the inline fixture leaves room for them.
-#[test]
-fn authored_crack_probability_controls_cuts() {
-    use super::spec::PartCut;
-    let mut house = fixture_house();
-    let mut chance = |value: f64| {
-        let PartCut::Courses(rule) = &mut house.parts.walls.cut else {
-            unreachable!("the fixture's walls are coursed")
-        };
-        rule.crack_chance.0 = value;
-        bake(
-            &house::construction(&house).unwrap(),
-            schema::substance_density,
-        )
-        .unwrap()
-        .cuts
-    };
-    let uncracked = chance(0.0);
-    assert_eq!(uncracked.cracks, 0);
-    assert!(uncracked.joints > 0);
-    assert!(chance(1.0).cracks > 0);
-}
-
 /// THE STREAM IS NAMED, NOT SEQUENCED: the same names draw the same numbers, other names
 /// others, so one element's cuts never shift when another element is added or re-cut.
 #[test]
@@ -735,8 +776,7 @@ fn anchors_name_the_authored_foundation_attachment() {
             &house::construction(&house).unwrap(),
             schema::substance_density,
         )
-        .unwrap()
-        .asset;
+        .unwrap();
         assert!(!asset.anchors.is_empty());
         for anchor in &asset.anchors {
             assert_eq!(asset.attachments[usize::from(anchor.attachment)], name);
@@ -778,8 +818,8 @@ fn assert_bond_kinds(construction: &Construction, asset: &ConstructionAsset) {
 /// changes those bonds alone, preserving the joint graph.
 #[test]
 fn every_bond_between_components_is_the_kind_its_spec_names() {
-    for (spec, baked) in shipped() {
-        let asset = &baked.asset;
+    for (spec, asset) in shipped() {
+        let asset = &asset;
         let built = &spec.construction;
         assert_bond_kinds(built, asset);
         for (k, join) in built.joins.iter().enumerate() {
@@ -798,16 +838,16 @@ fn every_bond_between_components_is_the_kind_its_spec_names() {
             changed.joins[k].by.clone_from(&other.by);
             let rebaked = bake(&changed, schema::substance_density)
                 .expect("only the declared holding kind changed");
-            assert_bond_kinds(&changed, &rebaked.asset);
-            assert_eq!(asset.joints.len(), rebaked.asset.joints.len());
+            assert_bond_kinds(&changed, &rebaked);
+            assert_eq!(asset.joints.len(), rebaked.joints.len());
             let kind = |asset: &ConstructionAsset, bond| match bond {
                 Bond::Seam => None,
                 Bond::Attached(k) => Some(asset.attachments[usize::from(k)].clone()),
             };
             let mut differences = 0;
-            for (was, now) in asset.joints.iter().zip(&rebaked.asset.joints) {
+            for (was, now) in asset.joints.iter().zip(&rebaked.joints) {
                 assert_eq!((was.a, was.b), (now.a, now.b));
-                differences += usize::from(kind(asset, was.bond) != kind(&rebaked.asset, now.bond));
+                differences += usize::from(kind(asset, was.bond) != kind(&rebaked, now.bond));
             }
             assert!(
                 differences > 0,
@@ -840,7 +880,7 @@ fn fastening_never_reads_an_element_name() {
         for (k, piece) in renamed.pieces.iter_mut().enumerate() {
             piece.name.clone_from(&names[(k + 1) % names.len()]);
         }
-        let asset = bake(&renamed, schema::substance_density).unwrap().asset;
+        let asset = bake(&renamed, schema::substance_density).unwrap();
         assert_bond_kinds(&renamed, &asset);
     }
 }
@@ -864,9 +904,9 @@ fn a_hull_that_collapses_in_f32_is_refused_before_it_is_written() {
     );
     let built = ConstructionSpec::from_ron(&construction(&[cube], ""))
         .expect("the far cube is a closed convex solid");
-    let baked = bake(&built, schema::substance_density).expect("the f64 certificate admits it");
+    let asset = bake(&built, schema::substance_density).expect("the f64 certificate admits it");
     let spec = "tools/constructions/fixture.pieces.ron";
-    let err = admitted(&baked.asset, spec).unwrap_err();
+    let err = admitted(&asset, spec).unwrap_err();
     assert!(
         err.contains(spec) && err.contains("chunks[0].hull") && err.contains("rebake"),
         "{err}"
@@ -1143,103 +1183,6 @@ fn overlapping_bounds_do_not_imply_overlapping_matter() {
         .expect("the slabs share no matter despite overlapping bounds");
 }
 
-/// Courses cut along the authored bond and leave depth intact. Fixture rows of three and ten
-/// courses are four modules wide and one metre deep: the three interior head joints must make
-/// four full-depth chunks. A module-only size gate rejects valid rows; skipping cuts fails here.
-#[test]
-fn course_chunk_bounds_follow_the_authored_geometry_and_row() {
-    let mut piece = lone(box_piece(
-        "row",
-        "Pier",
-        "Wood",
-        "Upright",
-        DVec3::ZERO,
-        DVec3::ONE,
-        FIXTURE_COURSES,
-    ));
-    for rows in [3, 10] {
-        let Pattern::Courses(bond) = &mut piece.pattern else {
-            unreachable!("fixture courses")
-        };
-        bond.rule.row_courses.0 = rows;
-        let height = f64::from(rows) * bond.course_m;
-        let module = bond.module_m;
-        let depth = 1.0;
-        piece.solid =
-            super::geom::tests::cuboid(DVec3::ZERO, DVec3::new(4.0 * module, height, depth));
-        let mut count = CutCount::default();
-        let cut = fracture::chunks(&piece, "fixture", &mut count);
-        assert_eq!(count.joints, 3);
-        assert_eq!(cut.len(), 4);
-        for chunk in cut {
-            chunk.certify(PLANE_M).unwrap();
-            let (lo, hi) = chunk.bounds();
-            let expected = DVec3::new(module, height, depth);
-            assert!((hi - lo - expected).length() < 1e-9, "{rows}: {lo}..{hi}");
-            assert!((chunk.volume() - module * height * depth).abs() < 1e-12);
-        }
-    }
-}
-
-/// Authors rely on min_width_m at both row ends, not merely the middle. Fixture: a one-row
-/// trapezoid tapers from 1 m to 0.8 m. With 0.26 m modules and a 0.08 m minimum, only the joints
-/// at 0.26 and 0.52 fit; 0.78 would leave 0.02 m at the top. A midpoint-only check accepts it.
-#[test]
-fn course_cuts_leave_the_authored_minimum_at_both_row_ends() {
-    let mut piece = lone(box_piece(
-        "taper",
-        "Pier",
-        "Wood",
-        "Upright",
-        DVec3::ZERO,
-        DVec3::ONE,
-        FIXTURE_COURSES,
-    ));
-    let Pattern::Courses(bond) = &mut piece.pattern else {
-        unreachable!("fixture courses")
-    };
-    bond.course_m = 1.0;
-    bond.rule.row_courses.0 = 1;
-    let minimum = bond.rule.min_width_m.0;
-    piece.solid = geom::Prism {
-        frame: geom::Frame {
-            origin: DVec3::ZERO,
-            u: DVec3::X,
-            v: DVec3::Y,
-        },
-        profile: [(0.0, 0.0), (1.0, 0.0), (0.8, 1.0), (0.0, 1.0)]
-            .map(|(x, y)| glam::DVec2::new(x, y))
-            .to_vec(),
-        near: 0.0,
-        far: 0.2,
-    }
-    .solid();
-    for chance in [0.0, 1.0] {
-        let Pattern::Courses(bond) = &mut piece.pattern else {
-            unreachable!("fixture courses")
-        };
-        bond.rule.crack_chance.0 = chance;
-        let mut count = CutCount::default();
-        let cut = fracture::chunks(&piece, "fixture", &mut count);
-        assert_eq!(
-            count.joints + count.cracks,
-            2,
-            "only two head joints clear both endpoints"
-        );
-        assert_eq!(cut.len(), 3);
-        for chunk in cut {
-            for y in [0.0, 1.0] {
-                let (lo, hi) = chunk.section_extent(DVec3::Y, y, DVec3::X).unwrap();
-                assert!(
-                    hi - lo >= minimum - 1e-9,
-                    "{y}: width {} < {minimum}",
-                    hi - lo
-                );
-            }
-        }
-    }
-}
-
 /// The stretched metric is Euclidean distance after undoing grain stretch. With the same seed,
 /// stretching the source and its grid along grain must stretch each cell by that factor; rotating
 /// both geometry and grain must rotate those cells. Authors and the view rely on these relations,
@@ -1256,7 +1199,7 @@ fn cells_follow_stretch_and_grain_rotation() {
         DVec3::splat(0.6),
         &cells(0.3, 1.0),
     ));
-    let reference = fracture::chunks(&source, "fixture", &mut CutCount::default());
+    let reference = fracture::chunks(&source, "fixture").unwrap();
     assert!(reference.len() > 1);
     let rotations: [(schema::SurfaceFrame, fn(DVec3) -> DVec3); 3] = [
         (schema::SurfaceFrame::Grain([0.0, 0.0, 1.0]), |p| p),
@@ -1290,7 +1233,7 @@ fn cells_follow_stretch_and_grain_rotation() {
             unreachable!("fixture cells")
         };
         rule.stretch.0 = 3.0;
-        let actual = fracture::chunks(&piece, "fixture", &mut CutCount::default());
+        let actual = fracture::chunks(&piece, "fixture").unwrap();
         assert_eq!(
             actual.len(),
             reference.len(),

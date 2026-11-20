@@ -174,30 +174,42 @@ impl Part {
     /// speed every failing joint's tension, shear and compression scale with the force. A tension
     /// crack starts at the force share `k = σ_t / σ`; a shear crack, where `τ = c + μ p`, at
     /// `k = c / (τ − μ p)`, `μ p` the capacity's friction share. The Hertz peak grows as
-    /// `(m v²)^(3/5)`, so the speed scales by `k^(5/6)`. The seams' strengths and the two sides'
-    /// stiffness come from the data.
+    /// `(m v²)^(3/5)`, so the speed scales by `k^(5/6)`. The verdict names one mode per interface,
+    /// tension first, so a joint read in tension far above the threshold may be over its shear
+    /// strength too, which binds lower down: the reference falls to each named mode's own speed
+    /// until no bond is over, or until f32 no longer resolves the step (a mode read at its own
+    /// speed is over by rounding alone). The seams' strengths and the two sides' stiffness come
+    /// from the data.
     fn threshold(&self, against: Contactor) -> f32 {
-        let reference = 100.0;
-        let (touches, _) = self.landing_on(reference, against);
-        let share = self
-            .failures(&touches)
-            .iter()
-            .map(|failure| {
-                let seam = self.structure.joints[failure.joint]
-                    .seam()
-                    .expect("a loaded internal joint of a breakable part is a bond");
-                match failure.cause {
-                    Cause::Tension => failure.capacity / failure.demand,
-                    Cause::Shear => {
-                        let cohesion = seam.shear.cohesion;
-                        let friction = failure.capacity - cohesion;
-                        cohesion / (failure.demand - friction)
+        let mut speed = 100.0;
+        loop {
+            let (touches, _) = self.landing_on(speed, against);
+            let share = self
+                .failures(&touches)
+                .iter()
+                .map(|failure| {
+                    let seam = self.structure.joints[failure.joint]
+                        .seam()
+                        .expect("a loaded internal joint of a breakable part is a bond");
+                    match failure.cause {
+                        Cause::Tension => failure.capacity / failure.demand,
+                        Cause::Shear => {
+                            let cohesion = seam.shear.cohesion;
+                            let friction = failure.capacity - cohesion;
+                            cohesion / (failure.demand - friction)
+                        }
+                        cause => {
+                            unreachable!("a bonded part fails by tension or shear, not {cause:?}")
+                        }
                     }
-                    cause => unreachable!("a bonded part fails by tension or shear, not {cause:?}"),
-                }
-            })
-            .fold(f32::INFINITY, f32::min);
-        reference * share.powf(5.0 / 6.0)
+                })
+                .fold(f32::INFINITY, f32::min);
+            let lower = speed * share.powf(5.0 / 6.0);
+            if lower.partial_cmp(&speed) != Some(std::cmp::Ordering::Less) {
+                return speed; // No bond over (an infinite share), or no step f32 resolves.
+            }
+            speed = lower;
+        }
     }
 }
 

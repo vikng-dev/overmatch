@@ -16,7 +16,7 @@ use overmatch::construction::attachments::Attachments;
 use overmatch::construction::schema::SurfaceFrame;
 use serde::Deserialize;
 
-use super::fracture::{CourseRule, Pattern};
+use super::fracture::{Pattern, PlanarRule};
 use super::geom::Polyhedron;
 
 /// A cut parameter and its job, authored `(value, Taste("…"))` or `(value, Resolution("…"))`: how
@@ -283,7 +283,6 @@ pub struct House {
     pub length_m: f64,
     pub wall_thickness_m: f64,
     pub course_m: f64,
-    pub module_m: f64,
     pub foundation_courses: u32,
     /// Attachment holding every component's foundation footprint.
     pub foundation_attachment: String,
@@ -328,9 +327,8 @@ pub struct Part {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub enum PartCut {
     Whole,
-    /// A running bond in the house's `course_m` and `module_m`, its datum the component's lowest
-    /// and first corner in the element's frame.
-    Courses(CourseRule),
+    /// Cells through the element's depth, the wall's thickness.
+    Planar(PlanarRule),
     Cells(super::fracture::Cells),
 }
 
@@ -370,7 +368,7 @@ impl House {
             check_frame(name, part.surface_frame)?;
             match &part.cut {
                 PartCut::Whole => Ok(()),
-                PartCut::Courses(rule) => rule.check(),
+                PartCut::Planar(rule) => rule.check(),
                 PartCut::Cells(cells) => cells.check(),
             }
             .map_err(|err| format!("{name}.cut: {err}"))?;
@@ -381,7 +379,6 @@ impl House {
             ("length_m", self.length_m),
             ("wall_thickness_m", self.wall_thickness_m),
             ("course_m", self.course_m),
-            ("module_m", self.module_m),
             ("plate_height_m", self.plate_height_m),
             ("board_width_m", self.board_width_m),
             ("board_thickness_m", self.board_thickness_m),

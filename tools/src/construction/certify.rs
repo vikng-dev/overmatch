@@ -203,7 +203,7 @@ mod tests {
     use super::super::fracture::Pattern;
     use super::super::geom::tests::cuboid;
     use super::super::spec::Piece;
-    use super::super::{CutCount, Spec, assemble, fracture, schema, specs};
+    use super::super::{Spec, assemble, fracture, schema, specs};
     use super::*;
 
     /// Every shipped construction and its cut, whatever it builds.
@@ -216,24 +216,18 @@ mod tests {
                     .construction
                     .pieces
                     .iter()
-                    .map(|piece| {
-                        fracture::chunks(piece, &spec.construction.id, &mut CutCount::default())
-                    })
-                    .collect();
+                    .map(|piece| fracture::chunks(piece, &spec.construction.id))
+                    .collect::<Result<_, _>>()
+                    .expect("the shipped specs cut");
                 (spec, cut)
             })
             .collect()
     }
 
     fn refusal(construction: &Construction, cut: Vec<Vec<Polyhedron>>) -> String {
-        assemble(
-            construction,
-            cut,
-            schema::substance_density,
-            CutCount::default(),
-        )
-        .err()
-        .unwrap_or_else(|| panic!("{}: the mutant bakes", construction.id))
+        assemble(construction, cut, schema::substance_density)
+            .err()
+            .unwrap_or_else(|| panic!("{}: the mutant bakes", construction.id))
     }
 
     /// The piece with the most chunks, and its chunk of the largest volume.
@@ -276,13 +270,8 @@ mod tests {
     #[test]
     fn every_shipped_cut_is_certified() {
         for (spec, cut) in shipped() {
-            assemble(
-                &spec.construction,
-                cut,
-                schema::substance_density,
-                CutCount::default(),
-            )
-            .unwrap_or_else(|err| panic!("{}: {err}", spec.path));
+            assemble(&spec.construction, cut, schema::substance_density)
+                .unwrap_or_else(|err| panic!("{}: {err}", spec.path));
         }
     }
 
@@ -292,13 +281,8 @@ mod tests {
     #[test]
     fn a_gap_is_refused() {
         let (construction, mut cut, (normal, offset)) = stacked();
-        assemble(
-            &construction,
-            cut.clone(),
-            schema::substance_density,
-            CutCount::default(),
-        )
-        .expect("the unmutated fixture bakes");
+        assemble(&construction, cut.clone(), schema::substance_density)
+            .expect("the unmutated fixture bakes");
         let (lo, hi) = cut[0][0].extent(normal);
         cut[0][0] = cut[0][0]
             .clip(normal, offset - 0.01 * (hi - lo))
@@ -377,18 +361,12 @@ mod tests {
     #[test]
     fn a_chunk_cut_off_is_refused() {
         let (construction, cut, _) = stacked();
-        let baked = assemble(
-            &construction,
-            cut.clone(),
-            schema::substance_density,
-            CutCount::default(),
-        )
-        .expect("the unmutated fixture bakes");
-        let mut asset = baked.asset.clone();
-        asset.joints.retain(|j| j.a != 1 && j.b != 1);
-        let err = graph(&construction, &cut, &asset).unwrap_err();
+        let mut asset = assemble(&construction, cut.clone(), schema::substance_density)
+            .expect("the unmutated fixture bakes");
+        let mut cut_off = asset.clone();
+        cut_off.joints.retain(|j| j.a != 1 && j.b != 1);
+        let err = graph(&construction, &cut, &cut_off).unwrap_err();
         assert!(err.contains("unmatched"), "{err}");
-        let mut asset = baked.asset;
         asset.joints.clear();
         let err = reach(&asset).unwrap_err();
         assert!(err.contains("reaches no anchor"), "{err}");
@@ -399,14 +377,10 @@ mod tests {
     #[test]
     fn an_unrepresentable_inertia_is_refused() {
         for (spec, cut) in shipped() {
-            let err = assemble(
-                &spec.construction,
-                cut,
-                |_: &str| Ok(f64::from(f32::MAX) * 1.0e6),
-                CutCount::default(),
-            )
-            .err()
-            .expect("an overflowing density is refused");
+            let err = assemble(&spec.construction, cut, |_: &str| {
+                Ok(f64::from(f32::MAX) * 1.0e6)
+            })
+            .expect_err("an overflowing density is refused");
             assert!(err.contains("inertia"), "{}: {err}", spec.path);
         }
     }

@@ -1,7 +1,7 @@
 //! The house generator: a [`House`] spec to its [`Construction`], whose pieces are the split
 //! tree's terminals (CGA's mass → walls → piers, openings, lintels, sills; Müller et al. 2006).
 //! Each piece is a right prism carrying its part's material, surface frame and cut; the generator
-//! supplies only a bond's frame: its datum and axes.
+//! supplies only a cut's depth axis.
 //!
 //! # The house's frame and parts
 //!
@@ -23,7 +23,7 @@
 
 use glam::{DVec2, DVec3};
 
-use super::fracture::{Courses, Pattern};
+use super::fracture::{Pattern, Planar};
 use super::geom::{Frame, Prism};
 use super::spec::{self, Construction, House, Opening, Part, PartCut, Piece};
 
@@ -47,31 +47,8 @@ struct Wall {
     gable: bool,
 }
 
-/// `part`'s cut of an element in `frame`: a bond's datum is the frame's point `datum` (its
-/// component's first `u` and lowest `v`), its axes the frame's `u` and `v`.
-fn pattern(house: &House, part: &Part, frame: Frame, datum: DVec2) -> Pattern {
-    match &part.cut {
-        PartCut::Whole => Pattern::Whole,
-        PartCut::Courses(rule) => Pattern::Courses(Courses {
-            origin: frame.point(datum, 0.0),
-            along: frame.u,
-            up: frame.v,
-            course_m: house.course_m,
-            module_m: house.module_m,
-            rule: rule.clone(),
-        }),
-        PartCut::Cells(cells) => Pattern::Cells(cells.clone()),
-    }
-}
-
-/// One element of `part`.
-fn piece(
-    house: &House,
-    part: &Part,
-    (name, label, component): (String, &str, String),
-    prism: &Prism,
-    datum: DVec2,
-) -> Piece {
+/// One element of `part`, its planar cut running through the prism's depth.
+fn piece(part: &Part, (name, label, component): (String, &str, String), prism: &Prism) -> Piece {
     Piece {
         name,
         part: label.to_owned(),
@@ -79,13 +56,15 @@ fn piece(
         material: part.material.clone(),
         surface_frame: part.surface_frame,
         solid: prism.solid(),
-        pattern: pattern(house, part, prism.frame, datum),
+        pattern: match &part.cut {
+            PartCut::Whole => Pattern::Whole,
+            PartCut::Planar(rule) => Pattern::Planar(Planar {
+                depth: prism.frame.w(),
+                rule: rule.clone(),
+            }),
+            PartCut::Cells(cells) => Pattern::Cells(cells.clone()),
+        },
     }
-}
-
-/// The lowest `(u, v)` of `profile`: a lone element's datum.
-fn lowest(profile: &[DVec2]) -> DVec2 {
-    profile.iter().fold(DVec2::INFINITY, |lo, &p| lo.min(p))
 }
 
 /// `house` as a construction. Its pieces in emission order: the walls (east, west, north, south;
@@ -183,8 +162,7 @@ pub fn construction(house: &House) -> Result<Construction, String> {
             "wall_plate",
             format!("{name}/plate"),
         );
-        let datum = lowest(&prism.profile);
-        pieces.push(piece(house, &house.parts.plates, names, &prism, datum));
+        pieces.push(piece(&house.parts.plates, names, &prism));
     }
     let (width, thick) = (house.board_width_m, house.board_thickness_m);
     for (name, side) in [("east", 1.0), ("west", -1.0)] {
@@ -204,7 +182,6 @@ pub fn construction(house: &House) -> Result<Construction, String> {
                 DVec2::new(s1, thick),
                 DVec2::new(top, thick),
             ];
-            let datum = lowest(&profile);
             let prism = Prism {
                 frame: plane,
                 profile,
@@ -213,7 +190,7 @@ pub fn construction(house: &House) -> Result<Construction, String> {
             };
             let board = format!("{name}/board_{board}");
             let names = (board.clone(), "roof", board);
-            pieces.push(piece(house, &house.parts.roof, names, &prism, datum));
+            pieces.push(piece(&house.parts.roof, names, &prism));
         }
     }
     spec::check_disjoint(&pieces)?;
@@ -237,9 +214,6 @@ fn wall_elements(
     pieces: &mut Vec<Piece>,
 ) {
     let course_y = |k: u32| base_y + f64::from(k) * house.course_m;
-    // A wall's piers, sills, lintels and gable are one component, coursed in one bond from the
-    // wall's first `u` on the foundation.
-    let datum = DVec2::new(wall.u.0, base_y);
     let mut push = |part: &str, index: usize, profile: Vec<DVec2>| {
         let name = if part == "gable" {
             format!("{}/{part}", wall.name)
@@ -253,7 +227,7 @@ fn wall_elements(
             far: wall.depth.1,
         };
         let names = (name, part, wall.name.to_owned());
-        pieces.push(piece(house, &house.parts.walls, names, &prism, datum));
+        pieces.push(piece(&house.parts.walls, names, &prism));
     };
     let mut from = wall.u.0;
     for (index, opening) in wall.openings.iter().enumerate() {
