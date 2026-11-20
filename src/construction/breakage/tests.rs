@@ -1119,13 +1119,13 @@ fn line_loads(structure: &Structure, lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<
         .collect()
 }
 
-/// A fixture crushed-volume load on law chunk `c` at its centroid, taking `share` of its pool, with
-/// no cavity energy, impulse or peak force: the removal half of a blast, independent of its
-/// pressure-driven section loading. ASSUMED fixture volume, not an energy-to-crush adapter.
-fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
+/// A fixture scab thrown off law chunk `c` at its centroid, taking `share` of its pool, and its
+/// removal load ([`Load::blast`]'s): no cavity energy, impulse or peak force. ASSUMED fixture
+/// volume, not a Law 2 reading.
+fn scab_on(structure: &Structure, c: usize, share: f32) -> (Vec<Load>, Vec<fracture::Scab>) {
     let chunk = &structure.chunks[c];
     let crushed = share * fracture::full_pool(chunk);
-    vec![Load {
+    let removal = Load {
         chunk: c,
         at: chunk.centroid,
         energy: 0.0,
@@ -1134,7 +1134,14 @@ fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
         peak: None,
         origin: Origin::Field,
         crushed,
-    }]
+    };
+    let scab = fracture::Scab {
+        chunk: c,
+        at: chunk.centroid,
+        mass: crushed * chunk.material.density,
+        velocity: Vec3::ZERO,
+    };
+    (vec![removal], vec![scab])
 }
 
 /// The record entries of `changes` on the composed house (ordinal 3) at `tick`.
@@ -1186,12 +1193,12 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
         Vec3::ZERO,
         STEP,
     );
-    let blast = blast_on(&authority.structure, dish_chunk, 0.05);
-    let holes = holes_of(&kind, &[], &blast);
+    let (removal, scabs) = scab_on(&authority.structure, dish_chunk, 0.05);
+    let holes = holes_of(&kind, &[], &scabs);
     let second = run_laws(
         &kind.layout.element_of,
         &mut authority,
-        &blast,
+        &removal,
         holes,
         Vec3::ZERO,
         STEP,
@@ -1407,8 +1414,8 @@ impl Volume {
 }
 
 /// A HOLE HOLDS THE VOLUME ITS LOAD CRUSHED: a line's channel (its cylinder about the chord,
-/// narrower here than the ball) holds `energy / crush` and a blast's dish (its half ball) its
-/// load's crushed volume, the volume each takes from the chunk's pool, to the millimetre rounding
+/// narrower here than the ball) holds `energy / crush` and a scab's dish (its half ball) its
+/// removal's volume, the volume each takes from the chunk's pool, to the millimetre rounding
 /// of their radius and ends. The size rule rests on it: a hole is never
 /// the size of a chunk still standing, since that volume is a spent pool and recorded as dust. A
 /// radius off by a constant factor fails here.
@@ -1441,14 +1448,14 @@ fn a_hole_holds_the_volume_its_load_crushed() {
     }
     .check();
 
-    let blast = blast_on(&structure, c, 0.01);
-    let [(_, dish)] = holes_of(&kind, &[], &blast)[..] else {
+    let (removal, scabs) = scab_on(&structure, c, 0.01);
+    let [(_, dish)] = holes_of(&kind, &[], &scabs)[..] else {
         panic!("one dish");
     };
     let r = f32::from(dish.radius) / 1000.0;
     Volume {
         held: 2.0 / 3.0 * PI * r.powi(3),
-        crushed: blast[0].crushed,
+        crushed: removal[0].crushed,
         bound: 3.0 * 0.0005 / r,
     }
     .check();
@@ -1767,23 +1774,6 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
     assert!(rays > 0, "the armour volume is in the field");
     assert_eq!(momentum, Vec3::ZERO, "an armour volume takes no push");
     assert!(wears, "and the rays pass it to the chunk");
-}
-
-/// A BLAST THAT CRUSHES A CHUNK'S FACE TAKES THE CHUNK WHOLE: the fixture burst 5 cm off a fixture
-/// cube, where its peak beats the brick's dynamic strength and its energy crushes less than the
-/// cube's pool, leaves the cube dust ([`blast_loads`]). A blast that took only the volume it
-/// crushed, leaving a shell round a dish, fails here; a breach drawn as cells removed whole rests
-/// on it.
-#[test]
-fn a_blast_that_crushes_a_chunk_s_face_takes_the_chunk_whole() {
-    let kind = shielding_cube();
-    let (start, w, _) = through(&kind, 0, 0, 0.0);
-    let (mut app, root) = composed_kind(false, &kind);
-    app.update();
-    app.update();
-    charge(&mut app, start + *w * 0.45);
-    let live = &app.world().get::<Breakage>(root).unwrap().live;
-    assert_eq!(live.state.fate[0], Fate::Dust);
 }
 
 /// A LOOSE PIECE SHADOWED BY A STANDING CHUNK TAKES NOTHING: a fixture burst half a metre before a

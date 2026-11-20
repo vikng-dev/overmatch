@@ -231,6 +231,10 @@ pub struct BlastFacts {
     /// Dynamic/static tensile-strength ratio over the row's `bulk.tensile`, at least one: a
     /// reference-rate datum whose rate its provenance states, as [`Self::compressive_dif`] is.
     pub tensile_dif: f64,
+    /// The volume an impulsively crushed volume's fractured zone spans, per crushed volume, at
+    /// least one: the zone holds the volume it surrounds. Its provenance names the law it stands
+    /// in for.
+    pub fractured_zone: f64,
 }
 
 /// What a round's burst block reads of the substance its burst core is made of. SI units.
@@ -475,7 +479,8 @@ impl BulkFile {
                 return Err(format!(
                     "substance {name:?}: bulk.blast is missing from a breakable material: author \
                      compressive_strength (Pa), compressive_dif, solid_density (kg/m³), \
-                     youngs_modulus (Pa) and tensile_dif, each with its material-property source"
+                     youngs_modulus (Pa), tensile_dif and fractured_zone, each with its \
+                     material-property source"
                 ));
             }
             // Bulk-only matter is unbreakable, so the blast material laws never read it.
@@ -533,6 +538,7 @@ struct BlastFile {
     solid_density: Option<Sourced<f64>>,
     youngs_modulus: Option<Sourced<f64>>,
     tensile_dif: Option<Sourced<f64>>,
+    fractured_zone: Option<Sourced<f64>>,
 }
 
 impl BlastFile {
@@ -562,6 +568,7 @@ impl BlastFile {
             solid_density: required("solid_density", self.solid_density)?,
             youngs_modulus: required("youngs_modulus", self.youngs_modulus)?,
             tensile_dif: required("tensile_dif", self.tensile_dif)?,
+            fractured_zone: required("fractured_zone", self.fractured_zone)?,
         };
         let tensile = tensile.ok_or_else(|| {
             format!(
@@ -573,6 +580,12 @@ impl BlastFile {
             return Err(format!(
                 "substance {name:?}: bulk.blast.tensile_dif must be at least one; author the \
                  dynamic/static tensile ratio with its material-property source"
+            ));
+        }
+        if facts.fractured_zone < 1.0 {
+            return Err(format!(
+                "substance {name:?}: bulk.blast.fractured_zone must be at least one, the crushed \
+                 volume it surrounds; author the zone per crushed volume with its source"
             ));
         }
         if facts.compressive_dif < 1.0 {
@@ -616,6 +629,7 @@ impl BlastFile {
                 "bulk.blast.youngs_modulus (bar wave speed)",
                 (facts.youngs_modulus / density).sqrt(),
             ),
+            ("bulk.blast.fractured_zone", facts.fractured_zone),
         ] {
             let stored = value as f32;
             if !stored.is_finite() || stored <= 0.0 {
@@ -1276,7 +1290,8 @@ mod tests {
                         compressive_dif: Some((2.0, Fixture("fixture"))),
                         solid_density: Some((2500.0, Fixture("fixture"))),
                         youngs_modulus: Some((8e9, Fixture("fixture"))),
-                        tensile_dif: Some((3.0, Fixture("fixture")))))))),"#,
+                        tensile_dif: Some((3.0, Fixture("fixture"))),
+                        fractured_zone: Some((4.0, Fixture("fixture")))))))),"#,
             ))
         };
         let path = std::path::Path::new("fixture/materials.ron");
@@ -1315,7 +1330,8 @@ mod tests {
                         compressive_dif: Some((2.0, Fixture("fixture"))),
                         solid_density: Some((2500.0, Fixture("fixture"))),
                         youngs_modulus: Some((8e9, Fixture("fixture"))),
-                        tensile_dif: Some((3.0, Fixture("fixture")))))))),"#,
+                        tensile_dif: Some((3.0, Fixture("fixture"))),
+                        fractured_zone: Some((4.0, Fixture("fixture")))))))),"#,
             ))
         };
         let path = std::path::Path::new("fixture/materials.ron");
@@ -1412,6 +1428,7 @@ mod tests {
             ("solid_density", "2500.0"),
             ("youngs_modulus", "8e9"),
             ("tensile_dif", "3.0"),
+            ("fractured_zone", "4.0"),
         ];
         let authored: Vec<String> = fields
             .iter()
@@ -1503,6 +1520,7 @@ mod tests {
             (1, "1e40", "compressive_dif"),
             (4, "0.5", "tensile_dif"),
             (4, "1e40", "tensile_dif"),
+            (5, "0.5", "fractured_zone"),
         ] {
             let mut invalid = authored.clone();
             invalid[index] = authored[index].replace(fields[index].1, value);
