@@ -843,6 +843,8 @@ impl Bed {
 }
 
 /// Cost is an observation on the existing headless fixtures, never an acceptance condition.
+/// Run on demand: `OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless scripts/serial-cargo test
+/// --lib --features dev_ui,bitprobe drive_relocate_cost_probe -- --ignored --nocapture`.
 #[cfg(all(feature = "bitprobe", feature = "dev_ui"))]
 #[test]
 #[ignore = "the drivetrain relocation cost reading, run on demand"]
@@ -3346,16 +3348,21 @@ fn solver_friction_readout_matches_hull_momentum_on_loose_pieces() {
     let (mut impulse, mut magnitude, mut pushed) = (0.0, 0.0, 0.0);
     let mut least_grip = f32::INFINITY;
     let pull = TICKS;
+    let mut opened = None;
     for tick in 0..pull {
         let previous_hard = bed.hard_reactions();
+        // The driving pass opens this tick's ledger sample along the hull's tick-start heading.
+        let hull = bed.hull();
+        let heading = bevy::math::Affine3A::from_rotation_translation(hull.rotation, hull.position)
+            .transform_vector3(Vec3::NEG_Z);
         bed.tick(1.0, 0.0);
-        if tick > 0 {
-            let (closed, heading) = bed
+        if let Some(heading) = opened.replace(heading) {
+            let closed = bed
                 .app
                 .world()
                 .get::<crate::track::driver::DriverSense>(bed.tank)
                 .unwrap()
-                .closed_contact_sample()
+                .closed_push()
                 .expect("the preceding driven interval closes a ledger sample");
             for (actual, hard) in closed.into_iter().zip(previous_hard) {
                 let expected = hard.map_or(0.0, |h| h.friction.dot(heading));

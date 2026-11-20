@@ -208,6 +208,11 @@ impl DriveTick {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn input(&self) -> &TransmissionInput {
+        &self.orders.controls.input
+    }
+
     pub fn report(&self, substeps: u32) -> TransmissionReport {
         assert_eq!(
             self.steps, substeps,
@@ -235,43 +240,5 @@ impl DriveTick {
             report.bitprobe.brakes_slide = self.brakes_slide;
         }
         report
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A physics wake without sampling still receives the real operator and power supply.
-    /// Scheduling may erase only the absent sampled ground load, never throttle or task service.
-    #[test]
-    fn contact_only_preserves_supply_and_intent_and_omits_only_sampled_load() {
-        use crate::track::drive_fixture::{class_drivetrains, construction};
-        for (fp, tp) in class_drivetrains() {
-            let fp = construction(&fp);
-            let axes = DriveAxes {
-                throttle: 0.7,
-                steer: 0.4,
-            }; // Fixture operator axes.
-            let target = DriveTarget {
-                supply: DriveSupply::WHOLE,
-                intent: DriveIntent::Axes(axes),
-            };
-            let state = DriveState {
-                transmission: TransmissionState::from_spec(&tp),
-                speeds: [0.0; 2],
-                phases: [0.0; 2],
-            };
-            let tick = DriveTick::contact_only(&fp, &tp, state, target, 1.0 / 384.0);
-            let input = tick.orders.controls.input;
-            assert_eq!(input.supply, target.supply);
-            assert_eq!(input.intent, target.intent);
-            assert_eq!(input.throttle, axes.throttle);
-            assert_eq!(input.steer, axes.steer);
-            assert_eq!(input.side_commands, axes.side_commands());
-            assert_eq!(input.reactions, [0.0; 2]);
-            assert_eq!(input.reaction_slopes, [0.0; 2]);
-            assert!(input.sensed.is_none());
-        }
     }
 }

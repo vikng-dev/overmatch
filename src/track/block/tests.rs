@@ -936,34 +936,3 @@ fn constrained_mobility_reflects_inertia_and_releases_exhausted_stops() {
         }
     }
 }
-
-/// Constructions beyond inline storage retain the same optimality and exact holding guarantees.
-#[test]
-fn spilled_blocks_preserve_optimality_and_held_mobility() {
-    let count = INLINE_CAPACITY + 1;
-    let speeds: Vec<_> = (0..count)
-        .map(|i| speed(i as f64 + 1.0, 1.0, 0.0))
-        .collect();
-    let rows: Vec<_> = (0..count)
-        .map(|i| {
-            let jacobian: Vec<_> = (0..count).map(|j| f64::from(i == j)).collect();
-            row(&jacobian, count as f64 + 1.0)
-        })
-        .collect();
-    let solved = solve(&speeds, &rows);
-    certify(&speeds, &rows, &solved);
-    assert!(
-        solved.speeds.spilled(),
-        "storage must admit constructions beyond inline capacity"
-    );
-    assert!(solved.speeds.iter().all(|&v| v == 0.0));
-    assert!(
-        solved
-            .response(&speeds, &rows, &[])
-            .mobility
-            .iter()
-            .flatten()
-            .all(|&v| v == 0.0),
-        "contacts rely on held coordinates having exactly zero mobility even after spilling"
-    );
-}

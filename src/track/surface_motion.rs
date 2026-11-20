@@ -20,24 +20,9 @@ impl Prescribed {
         );
         Self(speeds)
     }
-}
 
-impl SurfaceModel for Prescribed {
-    fn clone_model(&self) -> Box<dyn SurfaceModel> {
-        Box::new(self.clone())
-    }
     fn speed(&self, index: usize) -> f64 {
         f64::from(self.0[index])
-    }
-    fn mobility(&self, _index: usize) -> f64 {
-        0.0
-    }
-    fn free_mobility(&self, _index: usize) -> f64 {
-        0.0
-    }
-    fn warm_push(&mut self, _index: usize, _impulse: f64) {}
-    fn push(&mut self, _index: usize, _impulse: f64) -> bool {
-        false
     }
 }
 
@@ -65,6 +50,8 @@ struct Current {
 impl Drivetrain {
     /// Warm application preserves summation order but needs no intermediate solution. The first
     /// read settles all accumulated warm impulses; graph colouring gives the owner exclusive use.
+    /// That read runs inside the contact colour loop, serial at small populations; against an
+    /// owner-parallel settle pass after warm start, its cost is unmeasured.
     fn current(&self) -> &Current {
         self.current.get_or_init(|| {
             let mut warm = self.seed.clone();
@@ -222,13 +209,13 @@ impl SurfaceModel for Coordinates {
     fn mobility(&self, index: usize) -> f64 {
         match self {
             Self::Drivetrain(drive) => drive.current().response.mobility[index + 1][index + 1],
-            Self::Prescribed(p) => p.mobility(index),
+            Self::Prescribed(_) => 0.0,
         }
     }
     fn free_mobility(&self, index: usize) -> f64 {
         match self {
             Self::Drivetrain(drive) => 1.0 / drive.prepared.mechanical.speeds[index + 1].inertia,
-            Self::Prescribed(p) => p.free_mobility(index),
+            Self::Prescribed(_) => 0.0,
         }
     }
     fn warm_push(&mut self, index: usize, impulse: f64) {
@@ -244,7 +231,7 @@ impl SurfaceModel for Coordinates {
                     .expect("a contact binds its owner's prepared coordinate") += impulse;
                 drive.current.take();
             }
-            Self::Prescribed(p) => p.warm_push(index, impulse),
+            Self::Prescribed(_) => {} // A replica's speeds are streamed.
         }
     }
     fn push(&mut self, index: usize, impulse: f64) -> bool {
@@ -254,7 +241,7 @@ impl SurfaceModel for Coordinates {
         );
         match self {
             Self::Drivetrain(drive) => drive.push(index, impulse),
-            Self::Prescribed(p) => p.push(index, impulse),
+            Self::Prescribed(_) => false,
         }
     }
 }
@@ -270,52 +257,23 @@ pub(crate) fn surface_mut(body: &mut SolverBody) -> &mut Coordinates {
     data.downcast_mut()
         .expect("the witness installs drivetrain coordinates")
 }
-pub(crate) fn read_back(
-    body: &SolverBody,
-    tick: &mut transmission::DriveTick,
-    tp: &transmission::TransmissionParams,
-    h: f32,
-) {
-    tick.finish_contact(tp, surface(body), h);
-}
 
 /// Fixture: an unpowered drivetrain whose bounded elements have zero capacity. Its contact
 /// response is bare belt inertia, through the same adapter and block solver as a shipped tank.
 #[cfg(test)]
 pub(crate) fn free_fixture(speeds: [f32; 2], inertia: f32) -> Coordinates {
-    use super::drive_fixture::{construction, lab_fp, lab_tp};
-    use transmission::{DriveState, DriveSupply, DriveTick, TransmissionState};
+    use super::drive_fixture::{construction, lab_fp, lab_tp, unpowered_contact_tick};
     let mut fp = construction(&lab_fp());
     fp.belt_inertia = inertia;
     let mut tp = lab_tp();
     tp.brake_capacity_n = 0.0;
     tp.clutch_capacity = 0.0;
     tp.steer_capacity_n = 0.0;
-    let state = DriveState {
-        transmission: TransmissionState {
-            omega_e: 0.0,
-            park: false,
-            mean_hold: false,
-            ..TransmissionState::from_spec(&tp)
-        },
-        speeds,
-        phases: [0.0; 2],
+    let state = transmission::TransmissionState {
+        park: false,
+        ..transmission::TransmissionState::stopped()
     };
-    let mut tick = DriveTick::contact_only(
-        &fp,
-        &tp,
-        state,
-        super::drive::DriveTarget {
-            supply: DriveSupply {
-                control_authority: false,
-                task_rate: 0.0,
-                engine_in_action: false,
-                transmission_condition: 0.0,
-            },
-            intent: super::drive::DriveIntent::Axes(super::drive::DriveAxes::default()),
-        },
-        1.0,
-    );
+    let mut tick = unpowered_contact_tick(&fp, &tp, state, speeds, 0.0, 1.0);
     tick.prepare_contact(&fp, &tp, 1.0, false)
 }
 
@@ -327,40 +285,16 @@ mod tests {
     /// regime must depend on their net total, so contact ordering cannot latch a brake open.
     #[test]
     fn final_contact_totals_redetermine_the_brake_regime() {
-        use crate::track::drive_fixture::{class_drivetrains, construction};
-        use transmission::{DriveState, DriveSupply, DriveTick, TransmissionState};
+        use crate::track::drive_fixture::{
+            class_drivetrains, construction, unpowered_contact_tick,
+        };
         for (fp, tp) in class_drivetrains() {
             let fp = construction(&fp);
             let h = 1.0 / 384.0; // Fixture interval, s.
             let capacity = f64::from(tp.brake_capacity_n * tp.brake_static_factor * h);
             for sign in [-1.0, 1.0] {
-                let state = DriveState {
-                    transmission: TransmissionState {
-                        omega_e: 0.0,
-                        park: true,
-                        mean_hold: false,
-                        ..TransmissionState::from_spec(&tp)
-                    },
-                    speeds: [0.0; 2],
-                    phases: [0.0; 2],
-                };
-                let mut tick = DriveTick::contact_only(
-                    &fp,
-                    &tp,
-                    state,
-                    crate::track::drive::DriveTarget {
-                        supply: DriveSupply {
-                            control_authority: false,
-                            task_rate: 0.0,
-                            engine_in_action: false,
-                            transmission_condition: 0.0,
-                        },
-                        intent: crate::track::drive::DriveIntent::Axes(
-                            crate::track::drive::DriveAxes::default(),
-                        ),
-                    },
-                    h,
-                );
+                let state = transmission::TransmissionState::stopped();
+                let mut tick = unpowered_contact_tick(&fp, &tp, state, [0.0; 2], 0.0, h);
                 let mut coordinates = tick.prepare_contact(&fp, &tp, h, false);
                 let impulse = sign * 4.0 * capacity; // Fixture: exceeds every static side-stop budget.
                 coordinates.push(0, impulse);
@@ -417,17 +351,14 @@ mod tests {
                             speeds,
                             phases: [0.0; 2],
                         };
-                        let supply = DriveSupply {
-                            control_authority: true,
-                            task_rate: 1.0,
-                            engine_in_action: true,
-                            transmission_condition: 1.0,
-                        };
                         let mut tick = DriveTick::contact_only(
                             &fp,
                             &tp,
                             state,
-                            DriveTarget { supply, intent },
+                            DriveTarget {
+                                supply: DriveSupply::WHOLE,
+                                intent,
+                            },
                             h,
                         );
                         let mut coordinates = tick.prepare_contact(&fp, &tp, h, false);
@@ -494,11 +425,6 @@ mod tests {
             "worst relative speed gap {worst:e}"
         );
     }
-}
-
-#[cfg(test)]
-mod allocation_tests {
-    use super::*;
 
     /// Contact iteration must not allocate for a block that fits its inline storage.
     #[test]

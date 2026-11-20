@@ -121,6 +121,25 @@ pub(crate) struct FaceResponse {
     broke: bool,
 }
 
+/// The inverse-inertia inner product of two rows' coefficients.
+fn gram(a: &Row, b: &Row, speeds: &[Speed]) -> f64 {
+    a.jacobian
+        .iter()
+        .zip(&b.jacobian)
+        .zip(speeds)
+        .map(|((a, b), s)| a * b / s.inertia)
+        .sum()
+}
+
+/// The active limits' shadow prices on row `i`.
+fn correction(limits: &[ImpulseLimit], multipliers: &[f64], i: usize) -> f64 {
+    limits
+        .iter()
+        .zip(multipliers)
+        .map(|(limit, mu)| limit.coefficients[i] * mu)
+        .sum()
+}
+
 struct FaceSystem {
     interior: Inline<usize>,
     active: Inline<usize>,
@@ -144,13 +163,7 @@ fn face_system(
     let mut matrix: Inline<Inline<f64>> = smallvec![smallvec![0.0; size + 1]; size];
     for (i, &ri) in interior.iter().enumerate() {
         for (j, &rj) in interior.iter().enumerate() {
-            matrix[i][j] = rows[ri]
-                .jacobian
-                .iter()
-                .zip(&rows[rj].jacobian)
-                .zip(speeds)
-                .map(|((a, b), s)| a * b / s.inertia)
-                .sum();
+            matrix[i][j] = gram(&rows[ri], &rows[rj], speeds);
         }
         for (j, &li) in active.iter().enumerate() {
             matrix[i][nf + j] = limits[li].coefficients[ri];
@@ -318,15 +331,7 @@ fn physical_equalities(
     multipliers: &[f64],
 ) -> Inline<usize> {
     (0..rows.len())
-        .filter(|&i| {
-            states[i] == State::Interior
-                && limits
-                    .iter()
-                    .zip(multipliers)
-                    .map(|(limit, mu)| limit.coefficients[i] * mu)
-                    .sum::<f64>()
-                    == 0.0
-        })
+        .filter(|&i| states[i] == State::Interior && correction(limits, multipliers, i) == 0.0)
         .collect()
 }
 
@@ -350,11 +355,7 @@ fn check_face(
     for (i, row) in rows.iter().enumerate() {
         let bound = bounds[i];
         let allowance = RESOLUTION * bound.lower.abs().max(bound.upper.abs());
-        let correction: f64 = limits
-            .iter()
-            .zip(multipliers)
-            .map(|(l, mu)| l.coefficients[i] * mu)
-            .sum();
+        let correction = correction(limits, multipliers, i);
         let gradient = dot(&row.jacobian, velocity) - row.target + correction;
         let tolerance = row.slip_tolerance(velocity) + RESOLUTION * correction.abs();
         if impulses[i] < bound.lower - allowance
@@ -388,30 +389,23 @@ fn check_face(
         if value < limit.bounds.lower - tolerance || value > limit.bounds.upper + tolerance {
             return false;
         }
-        let active_bound = match states[rows.len() + j] {
-            State::Interior => None,
-            State::Lower => Some(limit.bounds.lower),
-            State::Upper => Some(limit.bounds.upper),
+        // A lower face's multiplier is nonpositive, an upper face's nonnegative.
+        let (bound, sign) = match states[rows.len() + j] {
+            State::Interior => continue,
+            State::Lower => (limit.bounds.lower, 1.0),
+            State::Upper => (limit.bounds.upper, -1.0),
         };
-        if let Some(bound) = active_bound {
-            if (value - bound).abs() > tolerance {
-                return false;
-            }
-            // Row residual allowances map to multiplier units through this normal's coefficients.
-            let allowance = (0..rows.len())
-                .filter(|&i| states[i] == State::Interior && limit.coefficients[i] != 0.0)
-                .map(|i| rows[i].slip_tolerance(velocity) / limit.coefficients[i].abs())
-                .reduce(f64::min)
-                .expect("an independent active normal has a free coefficient");
-            if limit.bounds.lower != limit.bounds.upper
-                && match states[rows.len() + j] {
-                    State::Lower => multipliers[j] > allowance,
-                    State::Upper => multipliers[j] < -allowance,
-                    State::Interior => unreachable!("an active limit has a face"),
-                }
-            {
-                return false;
-            }
+        if (value - bound).abs() > tolerance {
+            return false;
+        }
+        // Row residual allowances map to multiplier units through this normal's coefficients.
+        let allowance = (0..rows.len())
+            .filter(|&i| states[i] == State::Interior && limit.coefficients[i] != 0.0)
+            .map(|i| rows[i].slip_tolerance(velocity) / limit.coefficients[i].abs())
+            .reduce(f64::min)
+            .expect("an independent active normal has a free coefficient");
+        if limit.bounds.lower != limit.bounds.upper && sign * multipliers[j] > allowance {
+            return false;
         }
     }
     true
@@ -572,7 +566,7 @@ pub(crate) fn solve_limited(
             .find_map(|distance| {
                 search.neighbours(&seed, &mut Inline::with_capacity(rows.len()), distance)
             })
-            .expect("the loaded metric must leave an optimal independent KKT basis above the rank threshold; admission certifies only unloaded conditioning");
+            .expect("positive inertias always leave an optimal face with independent held rows; admission certifies its pivots clear the rank threshold in the unloaded metric");
         #[cfg(feature = "bitprobe")]
         {
             assignments_tried += search.assignments_tried.get();
@@ -735,15 +729,7 @@ impl Search<'_> {
                 .map(|&a| {
                     let mut line: Inline<_> = independent
                         .iter()
-                        .map(|&b| {
-                            self.rows[a]
-                                .jacobian
-                                .iter()
-                                .zip(&self.rows[b].jacobian)
-                                .zip(self.speeds)
-                                .map(|((a, b), s)| a * b / s.inertia)
-                                .sum()
-                        })
+                        .map(|&b| gram(&self.rows[a], &self.rows[b], self.speeds))
                         .collect();
                     line.push(0.0);
                     line

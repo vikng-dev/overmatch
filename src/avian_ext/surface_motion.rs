@@ -145,6 +145,18 @@ impl ContactMetric {
         (gradient, metric)
     }
 
+    /// Exchanges this point's impulse `p`, relative to its warm base, with both owners.
+    fn exchange(
+        &self,
+        bodies: (&mut SolverBody, &mut SolverBody),
+        p: Vec2,
+        applied: &mut [f64; 2],
+    ) -> bool {
+        let delta = p - self.previous.as_vec2();
+        let impulse = self.tangents[0] * delta.x + self.tangents[1] * delta.y;
+        exchange_pair(bodies, self.coordinates, impulse, applied)
+    }
+
     fn minimum(&self, bodies: (&mut SolverBody, &mut SolverBody), radius: f64) -> DVec2 {
         let (one, two) = bodies;
         let mut p = self.previous;
@@ -159,9 +171,7 @@ impl ContactMetric {
             let next = disk_minimum(metric, gradient - product(metric, p), radius)
                 .as_vec2()
                 .as_dvec2();
-            let delta = next.as_vec2() - self.previous.as_vec2();
-            let impulse = self.tangents[0] * delta.x + self.tangents[1] * delta.y;
-            if !exchange_pair((one, two), self.coordinates, impulse, &mut applied) {
+            if !self.exchange((one, two), next.as_vec2(), &mut applied) {
                 return next;
             }
             p = next;
@@ -169,21 +179,10 @@ impl ContactMetric {
         }
         // Drop this point's entire warm impulse before measuring slip. Zero impulse is the
         // work reference; a warm base can already contain numerical energy.
-        exchange_pair(
-            (one, two),
-            self.coordinates,
-            -self.tangents[0] * self.previous.x as f32 - self.tangents[1] * self.previous.y as f32,
-            &mut applied,
-        );
+        self.exchange((one, two), Vec2::ZERO, &mut applied);
         let (gradient, free) = self.evaluate((one, two), DVec2::ZERO, true);
         let next = disk_minimum(free, gradient, radius);
-        let delta = next.as_vec2() - self.previous.as_vec2();
-        exchange_pair(
-            (one, two),
-            self.coordinates,
-            self.tangents[0] * delta.x + self.tangents[1] * delta.y,
-            &mut applied,
-        );
+        self.exchange((one, two), next.as_vec2(), &mut applied);
         next
     }
 }
@@ -377,6 +376,17 @@ mod tests {
             avian3d::dynamics::solver::SolverConfig::default().max_overlap_solve_speed,
         );
     }
+    /// `relax` between `body`, a point mass, and the fixed world.
+    fn relax_on_fixed(row: &mut ContactConstraint, body: &mut SolverBody, mass: f32) {
+        let mut fixed = SolverBody::DUMMY;
+        relax(
+            row,
+            body,
+            &mut fixed,
+            &point_mass(mass),
+            &SolverBodyInertia::DUMMY,
+        );
+    }
 
     /// Bodies and finite surfaces rely on passive friction never creating kinetic energy.
     /// Fixture: arbitrary SPD tangent metrics, slips and capacities, including a pinned mode.
@@ -494,13 +504,7 @@ mod tests {
                     );
                     // Fixture: a normal press with no normal velocity; only friction is exercised.
                     constraint.points[0].normal_part.impulse = 1_000_000.0;
-                    relax(
-                        &mut constraint,
-                        &mut body,
-                        &mut fixed,
-                        &inertia,
-                        &SolverBodyInertia::DUMMY,
-                    );
+                    relax_on_fixed(&mut constraint, &mut body, mass);
                     let final_energy = 0.5
                         * f64::from(mass)
                         * body.linear_velocity.as_dvec3().length_squared()
@@ -618,8 +622,10 @@ mod tests {
     /// game's damage model, a moving box and a loaded plane with ample friction.
     #[test]
     fn contact_sees_the_bounded_brake_in_the_same_interval() {
-        use crate::track::drive_fixture::{class_drivetrains, construction};
-        use crate::track::transmission::{DriveState, DriveSupply, DriveTick, TransmissionState};
+        use crate::track::drive_fixture::{
+            class_drivetrains, construction, unpowered_contact_tick,
+        };
+        use crate::track::transmission::TransmissionState;
         for (fp, tp) in class_drivetrains() {
             let fp = construction(&fp);
             for h in [1.0 / 192.0, 1.0 / 768.0] {
@@ -628,32 +634,12 @@ mod tests {
                 for held in [true, false] {
                     let mass = 1000.0; // Fixture box mass, kg.
                     let speed = if held { 0.25 } else { 2.0 } * capacity / mass;
-                    let state = DriveState {
-                        transmission: TransmissionState {
-                            park: true,
-                            mean_hold: false,
-                            omega_e: 0.0,
-                            ..TransmissionState::from_spec(&tp)
-                        },
-                        speeds: [0.0; 2],
-                        phases: [0.0; 2],
-                    };
-                    let supply = DriveSupply {
-                        control_authority: false,
-                        task_rate: 0.0,
-                        engine_in_action: false,
-                        transmission_condition: 0.0,
-                    };
-                    let mut tick = DriveTick::contact_only(
+                    let mut tick = unpowered_contact_tick(
                         &fp,
                         &tp,
-                        state,
-                        crate::track::drive::DriveTarget {
-                            supply,
-                            intent: crate::track::drive::DriveIntent::Axes(
-                                crate::track::drive::DriveAxes::default(),
-                            ),
-                        },
+                        TransmissionState::stopped(),
+                        [0.0; 2],
+                        0.0,
                         h,
                     );
                     let mut body = SolverBody {
@@ -661,17 +647,10 @@ mod tests {
                         ..Default::default()
                     };
                     tick.prepare_contact(&fp, &tp, h, false).install(&mut body);
-                    let mut fixed = SolverBody::DUMMY;
                     let mut row = contact(mass);
                     row.points[0].normal_part.impulse = 4.0 * mass * speed / row.friction;
                     row.points[0].tangent_part.as_mut().unwrap().impulse = Vec2::ZERO;
-                    relax(
-                        &mut row,
-                        &mut body,
-                        &mut fixed,
-                        &point_mass(mass),
-                        &SolverBodyInertia::DUMMY,
-                    );
+                    relax_on_fixed(&mut row, &mut body, mass);
                     let expected = if held {
                         mass * speed
                     } else {
@@ -733,10 +712,10 @@ mod tests {
     /// every visit forced to the second, whose work reference is zero impulse.
     #[test]
     fn bounded_drivetrain_warm_start_cannot_exceed_frictionless_energy() {
-        use crate::track::drive_fixture::{class_drivetrains, construction};
-        use crate::track::transmission::{
-            DriveState, DriveSupply, DriveTick, LaunchState, TransmissionState,
+        use crate::track::drive_fixture::{
+            class_drivetrains, construction, unpowered_contact_tick,
         };
+        use crate::track::transmission::{LaunchState, TransmissionState};
         let coordinates = |body: &SolverBody| -> Coordinates {
             let model: &dyn core::any::Any = super::surface(body);
             model
@@ -750,34 +729,12 @@ mod tests {
             let h = 1.0 / 384.0; // Fixture interval, s.
             for mass in [1000.0_f32, 100_000.0, 100_000_000.0] {
                 for scale in [1.0, 4.0, 16.0, 64.0, 256.0] {
-                    let state = DriveState {
-                        transmission: TransmissionState {
-                            omega_e: 0.0,
-                            park: false,
-                            mean_hold: false,
-                            launch: LaunchState::Locked,
-                            ..TransmissionState::from_spec(&tp)
-                        },
-                        speeds: [0.0; 2],
-                        phases: [0.0; 2],
+                    let state = TransmissionState {
+                        park: false,
+                        launch: LaunchState::Locked,
+                        ..TransmissionState::stopped()
                     };
-                    let mut tick = DriveTick::contact_only(
-                        &fp,
-                        &tp,
-                        state,
-                        crate::track::drive::DriveTarget {
-                            supply: DriveSupply {
-                                control_authority: false,
-                                task_rate: 0.0,
-                                engine_in_action: false,
-                                transmission_condition: 1.0,
-                            },
-                            intent: crate::track::drive::DriveIntent::Axes(
-                                crate::track::drive::DriveAxes::default(),
-                            ),
-                        },
-                        h,
-                    );
+                    let mut tick = unpowered_contact_tick(&fp, &tp, state, [0.0; 2], 1.0, h);
                     let k = tp.ratio(false, tick.state.transmission.gear) / tp.sprocket_radius;
                     // DERIVED fixture impulse scale from both finite coupling budgets.
                     let warm = scale * h * (tp.clutch_capacity * k + 2.0 * tp.steer_capacity_n);
@@ -803,7 +760,6 @@ mod tests {
                                     + coordinates(body).kinetic_energy()
                             };
                             let mut reference = body.clone();
-                            let mut fixed = SolverBody::DUMMY;
                             let mut frictionless = contact(mass);
                             frictionless.friction = 0.0;
                             frictionless.points[0]
@@ -811,17 +767,12 @@ mod tests {
                                 .as_mut()
                                 .unwrap()
                                 .impulse = Vec2::ZERO;
-                            relax(
-                                &mut frictionless,
-                                &mut reference,
-                                &mut fixed,
-                                &point_mass(mass),
-                                &SolverBodyInertia::DUMMY,
-                            );
+                            relax_on_fixed(&mut frictionless, &mut reference, mass);
                             let baseline = energy(&reference);
                             let mut row = contact(mass);
                             row.points[0].tangent_part.as_mut().unwrap().impulse =
                                 Vec2::new(warm, 0.0);
+                            let mut fixed = SolverBody::DUMMY;
                             row.warm_start(
                                 &mut body,
                                 &mut fixed,
@@ -830,13 +781,7 @@ mod tests {
                                 1.0,
                             );
                             row.points[0].normal_part.impulse = 4.0 * warm / row.friction;
-                            relax(
-                                &mut row,
-                                &mut body,
-                                &mut fixed,
-                                &point_mass(mass),
-                                &SolverBodyInertia::DUMMY,
-                            );
+                            relax_on_fixed(&mut row, &mut body, mass);
                             // DERIVED: 64 f32 ulps of warm cancellation plus moving momentum,
                             // priced through the free mobility and the initial velocity.
                             let dp = 64.0

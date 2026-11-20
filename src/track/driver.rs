@@ -288,8 +288,6 @@ pub(super) struct Contacts {
 /// length. Nothing is sensed until [`MIN_SAMPLES`] driven ticks have closed.
 #[derive(Component, Clone, Debug)]
 pub struct DriverSense {
-    #[cfg(test)]
-    closed_heading: Option<Vec3>,
     window: usize,
     samples: VecDeque<Sample>,
     /// The solver's push for this tick is read on the next one, so the sample closes there.
@@ -303,21 +301,16 @@ pub struct DriverSense {
 }
 
 impl DriverSense {
-    /// The latest closed ledger sample; absent before any driven interval closes.
+    /// The latest closed ledger sample's push; absent before any driven interval closes.
     #[cfg(test)]
-    pub(crate) fn closed_contact_sample(&self) -> Option<([f32; 2], Vec3)> {
-        self.samples
-            .back()
-            .zip(self.closed_heading)
-            .map(|(sample, heading)| (sample.push, heading))
+    pub(crate) fn closed_push(&self) -> Option<[f32; 2]> {
+        self.samples.back().map(|sample| sample.push)
     }
 
     /// An empty ledger averaging one cut of `shift_ticks`, and no fewer than [`MIN_SAMPLES`].
     pub(crate) fn for_cut(shift_ticks: NonZeroU8) -> Self {
         let window = usize::from(shift_ticks.get()).max(MIN_SAMPLES);
         Self {
-            #[cfg(test)]
-            closed_heading: None,
             window,
             samples: VecDeque::with_capacity(window),
             open: None,
@@ -396,10 +389,6 @@ impl DriverSense {
             };
             if self.samples.len() == self.window {
                 self.samples.pop_front();
-            }
-            #[cfg(test)]
-            {
-                self.closed_heading = Some(open.heading);
             }
             self.samples.push_back(Sample {
                 push,

@@ -1375,15 +1375,16 @@ fn collect_surface_speeds(
             .as_mut()
             .expect("surface preparation creates this interval's mechanical state")
             .tick;
-        crate::track::surface_motion::read_back(
-            bodies
-                .get(*index)
-                .expect("an active tank's solver index addresses its state"),
-            tick,
+        tick.finish_contact(
             &gear
                 .as_deref()
                 .expect("a dynamic tank has running gear")
                 .trans,
+            crate::track::surface_motion::surface(
+                bodies
+                    .get(*index)
+                    .expect("an active tank's solver index addresses its state"),
+            ),
             time.delta_secs(),
         );
     });
@@ -1918,6 +1919,32 @@ mod tests {
             .id()
     }
 
+    /// [`adapter_app`] running a class drivetrain's construction and transmission.
+    fn adapter_app_for(
+        fp: &super::super::drive_fixture::FixtureConstruction,
+        tp: &TransmissionParams,
+    ) -> App {
+        let (mut app, _) = adapter_app();
+        let mut gear = app.world_mut().resource_mut::<TrackGear>();
+        gear.construction = super::super::drive_fixture::construction(fp);
+        gear.trans = tp.clone();
+        app
+    }
+
+    /// Fixture: a left belt face on a 2 m square outline, bearing whole.
+    fn square_face() -> super::super::stop_contacts::BeltFace {
+        super::super::stop_contacts::BeltFace::new(
+            Side::Left,
+            vec![
+                Vec2::new(-1.0, -1.0),
+                Vec2::new(1.0, -1.0),
+                Vec2::new(1.0, 1.0),
+                Vec2::new(-1.0, 1.0),
+            ],
+            super::super::stop_contacts::Bearing::Whole,
+        )
+    }
+
     /// Avian's tick-start velocity state on `body`, then the production adapter once.
     fn run_adapter(app: &mut App, bodies: &[(Entity, Vec3)]) {
         use avian3d::prelude::*;
@@ -2032,8 +2059,9 @@ mod tests {
         observed.impulses.push(coordinates.contact_impulses());
     }
 
-    /// A wake without a driving pass still exchanges belt momentum, with one public commit.
-    /// Readers of replicated belt phase rely on travel continuing during that contact-only tick.
+    /// A wake without a driving pass still exchanges belt momentum, with one public commit, under
+    /// the operator's real command: scheduling omits only the sampled ground load. Readers of
+    /// replicated belt phase rely on travel continuing during that contact-only tick.
     #[test]
     fn an_unsampled_contact_exchange_publishes_only_after_the_loop() {
         use avian3d::dynamics::solver::solver_body::{SolverBodies, SolverBodyIndex};
@@ -2057,9 +2085,19 @@ mod tests {
         };
         let mut transmission = app.world().get::<TankTransmission>(root).unwrap().0;
         transmission.park = false;
+        let axes = DriveAxes {
+            throttle: 0.7,
+            steer: 0.4,
+        }; // Fixture operator axes.
+        let command = ParsedTankCommand::try_from(crate::command::TankCommand {
+            throttle: axes.throttle,
+            steer: axes.steer,
+            ..default()
+        })
+        .unwrap();
         app.world_mut()
             .entity_mut(root)
-            .insert((before, TankTransmission(transmission)));
+            .insert((before, TankTransmission(transmission), command));
         app.world_mut().get_mut::<LastPass>(root).unwrap().at_rest = true;
         app.world_mut().get_mut::<SleepTimer>(root).unwrap().0 = 1.0;
         let index = *app.world().get::<SolverBodyIndex>(root).unwrap();
@@ -2073,6 +2111,18 @@ mod tests {
             app.world_mut()
                 .run_system_once(prepare_surface_speeds)
                 .unwrap();
+            let pending = app
+                .world()
+                .get::<DrivetrainStep>(root)
+                .unwrap()
+                .pending
+                .as_ref();
+            let input = pending.unwrap().tick.input();
+            assert_eq!(input.intent, DriveIntent::Axes(axes));
+            assert_eq!(
+                (input.reactions, input.reaction_slopes),
+                ([0.0; 2], [0.0; 2])
+            );
             {
                 let mut bodies = app.world_mut().resource_mut::<SolverBodies>();
                 crate::track::surface_motion::surface_mut(bodies.get_mut(index).unwrap())
@@ -2194,12 +2244,7 @@ mod tests {
         let mut contact_moved = false;
         for (fp, tp) in class_drivetrains() {
             for n in [1, 6, 11] {
-                let (mut app, _) = adapter_app();
-                {
-                    let mut gear = app.world_mut().resource_mut::<TrackGear>();
-                    gear.construction = construction(&fp);
-                    gear.trans = tp.clone();
-                }
+                let mut app = adapter_app_for(&fp, &tp);
                 let root = fixture_tank(&mut app, Vec3::Y * 100.0);
                 app.update();
                 app.update();
@@ -2257,18 +2302,7 @@ mod tests {
                         },
                     ));
                 }
-                app.world_mut().entity_mut(root).insert(
-                    super::super::stop_contacts::BeltFace::new(
-                        Side::Left,
-                        vec![
-                            Vec2::new(-1.0, -1.0),
-                            Vec2::new(1.0, -1.0),
-                            Vec2::new(1.0, 1.0),
-                            Vec2::new(-1.0, 1.0),
-                        ],
-                        super::super::stop_contacts::Bearing::Whole,
-                    ),
-                );
+                app.world_mut().entity_mut(root).insert(square_face());
                 let y = app.world().get::<Position>(root).unwrap().0.y;
                 app.world_mut().spawn((
                     RigidBody::Static,
@@ -2392,12 +2426,7 @@ mod tests {
                 for overload in [false, true] {
                     for n in [1, 3, 6, 12] {
                         for degrees in [15.0_f32, 30.0] {
-                            let (mut app, _) = adapter_app();
-                            {
-                                let mut gear = app.world_mut().resource_mut::<TrackGear>();
-                                gear.construction = super::super::drive_fixture::construction(&fp);
-                                gear.trans = tp.clone();
-                            }
+                            let mut app = adapter_app_for(&fp, &tp);
                             let rotation = Quat::from_rotation_x(degrees.to_radians());
                             let downhill = rotation * Vec3::Z;
                             let top = Vec3::Y * 10.0; // Fixture slab datum, m.
@@ -2428,16 +2457,7 @@ mod tests {
                                 SleepingDisabled,
                                 LockedAxes::ROTATION_LOCKED,
                                 Friction::new(1.0), // Fixture grip exceeds tan(30 degrees).
-                                super::super::stop_contacts::BeltFace::new(
-                                    Side::Left,
-                                    vec![
-                                        Vec2::new(-1.0, -1.0),
-                                        Vec2::new(1.0, -1.0),
-                                        Vec2::new(1.0, 1.0),
-                                        Vec2::new(-1.0, 1.0),
-                                    ],
-                                    super::super::stop_contacts::Bearing::Whole,
-                                ),
+                                square_face(),
                             ));
                             let size = Vec3::new(20.0, 1.0, 20.0); // Fixture slab dimensions, m.
                             let centre = top - rotation * Vec3::Y * size.y * 0.5;
@@ -2558,12 +2578,7 @@ mod tests {
     fn a_resting_trial_survives_a_late_wake_without_advancing_twice() {
         use super::super::drive_fixture::{class_drivetrains, construction, input};
         for (fp, tp) in class_drivetrains() {
-            let (mut app, _) = adapter_app();
-            {
-                let mut gear = app.world_mut().resource_mut::<TrackGear>();
-                gear.construction = construction(&fp);
-                gear.trans = tp.clone();
-            }
+            let mut app = adapter_app_for(&fp, &tp);
             let root = fixture_tank(&mut app, Vec3::Y * 100.0);
             app.update();
             app.update();
@@ -2760,20 +2775,10 @@ mod tests {
             let mu = 0.712; // Fixture contact friction.
             let (mut app, _) = adapter_app();
             let root = fixture_tank(&mut app, Vec3::Y * 100.0); // Fixture: no spring support.
-            let outline = vec![
-                Vec2::new(-1.0, -1.0),
-                Vec2::new(1.0, -1.0),
-                Vec2::new(1.0, 1.0),
-                Vec2::new(-1.0, 1.0),
-            ];
             let mut drive = TrackDrive::default();
             drive.sides.iter_mut().for_each(|side| side.speed = 2.0);
             app.world_mut().entity_mut(root).insert((
-                super::super::stop_contacts::BeltFace::new(
-                    Side::Left,
-                    outline,
-                    super::super::stop_contacts::Bearing::Whole,
-                ),
+                square_face(),
                 drive,
                 ParsedTankCommand::try_from(crate::command::TankCommand {
                     throttle: 1.0,
@@ -2803,6 +2808,8 @@ mod tests {
                 }]],
                 1.0 / 64.0,
             ));
+            // The second driving pass closes the first's ledger sample with the transfer read.
+            run_adapter(&mut app, &[(root, Vec3::ZERO)]);
             run_adapter(&mut app, &[(root, Vec3::ZERO)]);
             assert!(
                 app.world()
@@ -2812,21 +2819,28 @@ mod tests {
                     .iter()
                     .all(Vec::is_empty)
             );
-            let reaction = app
-                .world()
-                .get::<TrackGripEffect>(root)
+            let world = app.world();
+            let push = world
+                .get::<super::super::driver::DriverSense>(root)
                 .unwrap()
-                .belt_reaction;
-            (
-                app.world().get::<TrackDrive>(root).unwrap().sides[0].speed,
-                reaction,
-            )
+                .closed_push()
+                .expect("the second driving pass closes the first's sample");
+            let reaction = world.get::<TrackGripEffect>(root).unwrap().belt_reaction;
+            let speed = world.get::<TrackDrive>(root).unwrap().sides[0].speed;
+            ((speed, reaction), push)
         };
         // Fixture: a large already-delivered solver exchange, N s.
-        let (free, loaded) = (run(0.0), run(1_000_000.0));
+        let impulse = 1_000_000.0;
+        let ((free, _), (loaded, push)) = (run(0.0), run(impulse));
         assert_eq!(
             loaded, free,
             "a delivered impulse cannot be integrated into a belt again"
+        );
+        // The ledger reads the same transfer as history: its traction over the 1/64 s step.
+        assert_eq!(push[1], 0.0);
+        assert!(
+            (push[0].abs() - impulse * 64.0).abs() <= impulse * 64.0 * 1e-6,
+            "the Driver reads the delivered traction, {push:?}"
         );
     }
 

@@ -1558,10 +1558,9 @@ fn passive_rows(
                 .expect("a constructed mean stop has its own admitted rating"),
         ) * f64::from(inp.dt);
         rows.push(Row {
-            jacobian: Coupling::Stop(Output::Mean)
-                .jacobian(0.0, 0.0)
-                .into_iter()
-                .collect(),
+            jacobian: super::block::Inline::from_slice(
+                &Coupling::Stop(Output::Mean).jacobian(0.0, 0.0),
+            ),
             target: 0.0,
             bounds: symmetric(rating * f64::from(tp.brake_static_factor)),
             dynamic: Some(symmetric(rating)),
@@ -1594,7 +1593,7 @@ fn passive_rows(
                 };
                 let lever = st.park || (!controls.service && !inner);
                 rows.push(Row {
-                    jacobian: coupling.jacobian(0.0, 0.0).into_iter().collect(),
+                    jacobian: super::block::Inline::from_slice(&coupling.jacobian(0.0, 0.0)),
                     target: 0.0,
                     bounds: bounds(if lever {
                         capacity * f64::from(tp.brake_static_factor)
@@ -1739,10 +1738,9 @@ fn prepare_rows(
                 let upper = if open { 0.0 } else { capacity };
                 clutches.push(rows.len());
                 rows.push(Row {
-                    jacobian: coupling
-                        .jacobian(dir * k, signed_steer)
-                        .into_iter()
-                        .collect(),
+                    jacobian: super::block::Inline::from_slice(
+                        &coupling.jacobian(dir * k, signed_steer),
+                    ),
                     target: 0.0,
                     bounds: Bounds { lower, upper },
                     dynamic: None,
@@ -1752,10 +1750,9 @@ fn prepare_rows(
             Coupling::Steering => {
                 steering = Some(rows.len());
                 rows.push(Row {
-                    jacobian: coupling
-                        .jacobian(dir * k, signed_steer)
-                        .into_iter()
-                        .collect(),
+                    jacobian: super::block::Inline::from_slice(
+                        &coupling.jacobian(dir * k, signed_steer),
+                    ),
                     target: 0.0,
                     bounds: symmetric(steering_capacity),
                     dynamic: None,
@@ -2252,11 +2249,7 @@ pub(crate) struct PreparedDrive {
     #[cfg(feature = "bitprobe")]
     omega_pre: f32,
     #[cfg(feature = "bitprobe")]
-    mean: f32,
-    #[cfg(feature = "bitprobe")]
     ratio: f32,
-    #[cfg(feature = "bitprobe")]
-    k: f32,
     #[cfg(feature = "bitprobe")]
     probe: TransmissionProbe,
 }
@@ -2311,11 +2304,7 @@ pub(crate) fn prepare_advance(
         #[cfg(feature = "bitprobe")]
         omega_pre,
         #[cfg(feature = "bitprobe")]
-        mean,
-        #[cfg(feature = "bitprobe")]
         ratio,
-        #[cfg(feature = "bitprobe")]
-        k,
         #[cfg(feature = "bitprobe")]
         probe,
     }
@@ -2343,12 +2332,9 @@ pub(crate) fn finish_advance(
     #[cfg(feature = "bitprobe")]
     {
         let PreparedDrive {
-            omega_pre,
-            mean,
-            ratio,
-            k,
-            ..
+            omega_pre, ratio, ..
         } = *prepared;
+        let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
         force_probe(
             tp,
             inp,
@@ -2370,7 +2356,7 @@ pub(crate) fn finish_advance(
         probe.direction = controls.dir;
         probe.shaft_speed = controls.dir * mean;
         probe.gear_reduction = ratio;
-        probe.k = k;
+        probe.k = ratio / tp.sprocket_radius;
         probe.omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
         probe.omega_floor = if st.launch != LaunchState::Locked && controls.propulsive >= dead() {
             tp.launch_omega(controls.propulsive)
@@ -2381,7 +2367,7 @@ pub(crate) fn finish_advance(
         probe.shifting = controls.shifting;
         probe.engaged = st.clutch != ClutchState::Out;
         probe.tau_c = clutch_torque;
-        probe.clutch_force_n = controls.dir * k * clutch_torque;
+        probe.clutch_force_n = controls.dir * probe.k * clutch_torque;
         probe.steering_force_n = steer_force;
         probe.lambda = steer_force;
         probe.j = [0.5, -0.5];
