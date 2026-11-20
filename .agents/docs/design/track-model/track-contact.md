@@ -134,8 +134,10 @@ static slab, after one second settling, twelve-second runs gave:
 An exact-zero owner push reuses its already-certified totals. Native energy grids, all rigid
 and parked slab readings, the complete scorecard JSON and every visit count matched the
 pre-elision row byte-for-byte in a one-time comparison (MEASURED).
-The native passive grids left exactly zero kinetic energy in all 60 at-rest cells; all 120
-moving cells finished below their frictionless reference (MEASURED).
+The native passive grid runs each cell on the shipped exits and again with every visit forced to
+the second exit. In both, all 60 at-rest cells finished at or below 1.2e-27 J (13 exactly zero),
+and all 120 moving cells below their frictionless reference (MEASURED 2026-11-20). Forcing the
+second exit to the face mobility instead of the bare one fails the forced moving cells.
 
 The scorecard's sand above-limit assertion fails on both `main` (`7b046e22`, release) and
 this row (edit): the stated acceleration lower bound is -0.58139 m/s², observed acceleration

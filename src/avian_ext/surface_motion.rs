@@ -336,7 +336,7 @@ pub fn solve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::track::surface_motion::{free_fixture, surface};
+    use crate::track::surface_motion::{Coordinates, free_fixture, surface};
     use avian3d::collision::contact_types::ContactId;
     use avian3d::dynamics::solver::{
         contact::{ContactConstraintPoint, ContactNormalPart, ContactTangentPart},
@@ -699,103 +699,49 @@ mod tests {
     fn zero_friction_budget_still_checks_finite_inputs() {
         disk_minimum([1.0, 0.0, 1.0], DVec2::new(f64::NAN, 0.0), 0.0);
     }
-    /// The game's contact physics: numerical warm impulses cannot supply energy to an
-    /// unpowered drivetrain and rigid body initially at rest, including bounded clutch faces.
+    /// Fixture: an owner whose every push reports a changed face, so each visit takes the
+    /// contact's second exit, the bare-inertia step from zero impulse.
+    #[derive(Clone, Debug)]
+    struct EveryPushChangesFace(Coordinates);
+    impl SurfaceModel for EveryPushChangesFace {
+        fn clone_model(&self) -> Box<dyn SurfaceModel> {
+            Box::new(self.clone())
+        }
+        fn speed(&self, index: usize) -> f64 {
+            self.0.speed(index)
+        }
+        fn mobility(&self, index: usize) -> f64 {
+            self.0.mobility(index)
+        }
+        fn free_mobility(&self, index: usize) -> f64 {
+            self.0.free_mobility(index)
+        }
+        fn warm_push(&mut self, index: usize, impulse: f64) {
+            self.0.warm_push(index, impulse);
+        }
+        fn push(&mut self, index: usize, impulse: f64) -> bool {
+            self.0.push(index, impulse);
+            true
+        }
+    }
+
+    /// The game's contact physics: a numerical warm start cannot leave an unpowered drivetrain
+    /// and rigid body more energy than a frictionless visit from the same state, and none from
+    /// rest, including bounded clutch faces. Each cell runs the shipped exits and again with
+    /// every visit forced to the second, whose work reference is zero impulse.
     #[test]
-    fn bounded_drivetrain_warm_start_cannot_create_energy_from_rest() {
+    fn bounded_drivetrain_warm_start_cannot_exceed_frictionless_energy() {
         use crate::track::drive_fixture::{class_drivetrains, construction};
         use crate::track::transmission::{
             DriveState, DriveSupply, DriveTick, LaunchState, TransmissionState,
         };
-        for (class, (fp, tp)) in class_drivetrains().into_iter().enumerate() {
-            let fp = construction(&fp);
-            let h = 1.0 / 384.0; // Fixture interval, s.
-            for mass in [1000.0_f32, 100_000.0, 100_000_000.0] {
-                for scale in [1.0, 4.0, 16.0, 64.0, 256.0] {
-                    let state = DriveState {
-                        transmission: TransmissionState {
-                            omega_e: 0.0,
-                            park: false,
-                            mean_hold: false,
-                            launch: LaunchState::Locked,
-                            ..TransmissionState::from_spec(&tp)
-                        },
-                        speeds: [0.0; 2],
-                        phases: [0.0; 2],
-                    };
-                    let supply = DriveSupply {
-                        control_authority: false,
-                        task_rate: 0.0,
-                        engine_in_action: false,
-                        transmission_condition: 1.0,
-                    };
-                    let mut tick = DriveTick::contact_only(
-                        &fp,
-                        &tp,
-                        state,
-                        crate::track::drive::DriveTarget {
-                            supply,
-                            intent: crate::track::drive::DriveIntent::Axes(
-                                crate::track::drive::DriveAxes::default(),
-                            ),
-                        },
-                        h,
-                    );
-                    let k = tp.ratio(false, tick.state.transmission.gear) / tp.sprocket_radius;
-                    // DERIVED fixture impulse scale from both finite coupling budgets.
-                    let warm = scale * h * (tp.clutch_capacity * k + 2.0 * tp.steer_capacity_n);
-                    let mut body = SolverBody::default();
-                    tick.prepare_contact(&fp, &tp, h, false).install(&mut body);
-                    assert_eq!(
-                        surface(&body).kinetic_energy(),
-                        0.0,
-                        "the fixture must be passive and initially at rest"
-                    );
-                    let mut fixed = SolverBody::DUMMY;
-                    let mut row = contact(mass);
-                    row.points[0].tangent_part.as_mut().unwrap().impulse = Vec2::new(warm, 0.0);
-                    row.warm_start(
-                        &mut body,
-                        &mut fixed,
-                        &point_mass(mass),
-                        &SolverBodyInertia::DUMMY,
-                        1.0,
-                    );
-                    row.points[0].normal_part.impulse = 4.0 * warm / row.friction;
-                    relax(
-                        &mut row,
-                        &mut body,
-                        &mut fixed,
-                        &point_mass(mass),
-                        &SolverBodyInertia::DUMMY,
-                    );
-                    let energy =
-                        0.5 * f64::from(mass) * body.linear_velocity.as_dvec3().length_squared()
-                            + surface(&body).kinetic_energy();
-                    // DERIVED: allow 64 f32 ulps of warm-momentum cancellation, priced at free mobility.
-                    let dp = 64.0 * f64::from(f32::EPSILON * warm);
-                    let rounding = 0.5 * dp * dp * f64::from(1.0 / mass + 1.0 / fp.belt_inertia);
-                    let impulse = row.points[0].tangent_part.as_ref().unwrap().impulse;
-                    println!(
-                        "PASSIVE_WARM class={class} mass={mass} warm={warm} impulse={impulse:?} body={:?} energy={energy} J rounding={rounding} J",
-                        body.linear_velocity
-                    );
-                    assert!(
-                        energy <= rounding,
-                        "passive warm start created {energy} J from rest (roundoff {rounding} J), class={class}, mass={mass}, warm={warm}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// A numerical warm start cannot leave more energy than a frictionless visit from the
-    /// same moving state. The hull and passive drivetrain rely on composed contact passivity.
-    #[test]
-    fn bounded_drivetrain_moving_warm_start_cannot_exceed_frictionless_energy() {
-        use crate::track::drive_fixture::{class_drivetrains, construction};
-        use crate::track::transmission::{
-            DriveState, DriveSupply, DriveTick, LaunchState, TransmissionState,
+        let coordinates = |body: &SolverBody| -> Coordinates {
+            let model: &dyn core::any::Any = super::surface(body);
+            model
+                .downcast_ref::<Coordinates>()
+                .or_else(|| model.downcast_ref::<EveryPushChangesFace>().map(|f| &f.0))
+                .expect("the witness installs drivetrain coordinates")
+                .clone()
         };
         for (class, (fp, tp)) in class_drivetrains().into_iter().enumerate() {
             let fp = construction(&fp);
@@ -831,65 +777,80 @@ mod tests {
                         h,
                     );
                     let k = tp.ratio(false, tick.state.transmission.gear) / tp.sprocket_radius;
+                    // DERIVED fixture impulse scale from both finite coupling budgets.
                     let warm = scale * h * (tp.clutch_capacity * k + 2.0 * tp.steer_capacity_n);
-                    for velocity in [-1.68, 1.68] {
+                    for velocity in [-1.68, 0.0, 1.68] {
                         // Fixture hull motion, m/s.
-                        let mut body = SolverBody::default();
-                        tick.prepare_contact(&fp, &tp, h, false).install(&mut body);
-                        body.linear_velocity = Vec3::Z * velocity;
-                        let energy = |body: &SolverBody| {
-                            0.5 * f64::from(mass) * body.linear_velocity.as_dvec3().length_squared()
-                                + surface(body).kinetic_energy()
-                        };
-                        let mut reference = body.clone();
-                        let mut fixed = SolverBody::DUMMY;
-                        let mut frictionless = contact(mass);
-                        frictionless.friction = 0.0;
-                        frictionless.points[0]
-                            .tangent_part
-                            .as_mut()
-                            .unwrap()
-                            .impulse = Vec2::ZERO;
-                        relax(
-                            &mut frictionless,
-                            &mut reference,
-                            &mut fixed,
-                            &point_mass(mass),
-                            &SolverBodyInertia::DUMMY,
-                        );
-                        let baseline = energy(&reference);
-                        let mut row = contact(mass);
-                        row.points[0].tangent_part.as_mut().unwrap().impulse = Vec2::new(warm, 0.0);
-                        row.warm_start(
-                            &mut body,
-                            &mut fixed,
-                            &point_mass(mass),
-                            &SolverBodyInertia::DUMMY,
-                            1.0,
-                        );
-                        row.points[0].normal_part.impulse = 4.0 * warm / row.friction;
-                        relax(
-                            &mut row,
-                            &mut body,
-                            &mut fixed,
-                            &point_mass(mass),
-                            &SolverBodyInertia::DUMMY,
-                        );
-                        // DERIVED: 64 f32 ulps of warm cancellation plus moving momentum,
-                        // priced through the free mobility and the initial velocity.
-                        let dp = 64.0
-                            * f64::from(f32::EPSILON)
-                            * (f64::from(warm) + f64::from(mass * velocity).abs());
-                        let rounding = f64::from(velocity).abs() * dp
-                            + 0.5 * dp * dp * f64::from(1.0 / mass + 1.0 / fp.belt_inertia);
-                        let after = energy(&body);
-                        println!(
-                            "PASSIVE_MOVING class={class} mass={mass} warm={warm} v={velocity} energy={after} frictionless={baseline} allowance={rounding} J"
-                        );
-                        assert!(
-                            after <= baseline + rounding,
-                            "moving contact energy {after} > frictionless {baseline} + {rounding} J, class={class}, mass={mass}, warm={warm}, v={velocity}"
-                        );
+                        for forced in [false, true] {
+                            let mut body = SolverBody::default();
+                            let prepared = tick.prepare_contact(&fp, &tp, h, false);
+                            assert_eq!(
+                                prepared.kinetic_energy(),
+                                0.0,
+                                "the fixture drivetrain must be passive and initially at rest"
+                            );
+                            if forced {
+                                install(EveryPushChangesFace(prepared), &mut body);
+                            } else {
+                                prepared.install(&mut body);
+                            }
+                            body.linear_velocity = Vec3::Z * velocity;
+                            let energy = |body: &SolverBody| {
+                                0.5 * f64::from(mass)
+                                    * body.linear_velocity.as_dvec3().length_squared()
+                                    + coordinates(body).kinetic_energy()
+                            };
+                            let mut reference = body.clone();
+                            let mut fixed = SolverBody::DUMMY;
+                            let mut frictionless = contact(mass);
+                            frictionless.friction = 0.0;
+                            frictionless.points[0]
+                                .tangent_part
+                                .as_mut()
+                                .unwrap()
+                                .impulse = Vec2::ZERO;
+                            relax(
+                                &mut frictionless,
+                                &mut reference,
+                                &mut fixed,
+                                &point_mass(mass),
+                                &SolverBodyInertia::DUMMY,
+                            );
+                            let baseline = energy(&reference);
+                            let mut row = contact(mass);
+                            row.points[0].tangent_part.as_mut().unwrap().impulse =
+                                Vec2::new(warm, 0.0);
+                            row.warm_start(
+                                &mut body,
+                                &mut fixed,
+                                &point_mass(mass),
+                                &SolverBodyInertia::DUMMY,
+                                1.0,
+                            );
+                            row.points[0].normal_part.impulse = 4.0 * warm / row.friction;
+                            relax(
+                                &mut row,
+                                &mut body,
+                                &mut fixed,
+                                &point_mass(mass),
+                                &SolverBodyInertia::DUMMY,
+                            );
+                            // DERIVED: 64 f32 ulps of warm cancellation plus moving momentum,
+                            // priced through the free mobility and the initial velocity.
+                            let dp = 64.0
+                                * f64::from(f32::EPSILON)
+                                * (f64::from(warm) + f64::from(mass * velocity).abs());
+                            let rounding = f64::from(velocity).abs() * dp
+                                + 0.5 * dp * dp * f64::from(1.0 / mass + 1.0 / fp.belt_inertia);
+                            let after = energy(&body);
+                            println!(
+                                "PASSIVE_WARM class={class} mass={mass} warm={warm} v={velocity} forced={forced} energy={after} frictionless={baseline} allowance={rounding} J"
+                            );
+                            assert!(
+                                after <= baseline + rounding,
+                                "contact energy {after} > frictionless {baseline} + {rounding} J, class={class}, mass={mass}, warm={warm}, v={velocity}, forced={forced}"
+                            );
+                        }
                     }
                 }
             }
