@@ -1,8 +1,13 @@
 //! Tracked full-speed ram instrument for the game's environment destruction model, game state only.
 //! `scripts/perf/collapse.py --ram` owns `OVERMATCH_RAM`. Default-feature servers derive the
 //! run-up from their loaded drive data and resolve ground height at spawn, without view assets.
+//!
+//! HULL. Each row reads the ram's one tank after the tick's physics step, outside the tick clock
+//! ([`HullRow`]): its motion, and what moved it along its forward over that step, from the step's
+//! solver points ([`ContactTransfers`], held until the next step) and the sweep's account. A body
+//! retired between the step and the row has no kind left to read and counts as `retired`.
 
-use avian3d::prelude::{LinearVelocity, Sleeping};
+use avian3d::prelude::{LinearVelocity, Position, Rotation, Sleeping};
 use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, ParallelSlice, ParallelSliceMut};
 use serde::{Deserialize, Serialize};
@@ -11,6 +16,7 @@ use serde_json::{Value, json};
 use super::contact_census::{ContactTick, StepSnapshot};
 use super::harness::{LeverError, env_text};
 use crate::{
+    command::ParsedTankCommand,
     construction::{
         Body,
         breakage::{Breakage, Piece, SweepAccount},
@@ -20,11 +26,13 @@ use crate::{
         TickSample, Trace, phases,
         stages::{self, NamedCounts, NamedTimes},
     },
+    debris::DebrisPiece,
     map::{MapManifest, Prototype},
     scatter::MapInstance,
     spec::TankSpec,
     tank::{Tank, TankTemplate},
     terrain_grid::{HeightGrid, Stance, spawn_pos},
+    track::sim::TrackDrive,
 };
 
 const LEVER: &str = "OVERMATCH_RAM";
@@ -78,6 +86,9 @@ struct Plan {
     runup_m: f32,
     governed_m_s: f32,
     minimum_m_s: f64,
+    /// DERIVED: where the hull's root has carried its rear past the construction, along the
+    /// heading from the map origin, m: the construction's far bound plus the tank's stance reach.
+    clear_m: f32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
@@ -85,6 +96,7 @@ struct Plan {
 enum End {
     Rest,
     Deadline,
+    /// The target or the ram's one tank went, or another tank joined.
     WorldChanged,
     ApproachTimeout,
 }
@@ -94,7 +106,8 @@ pub(super) struct Ram {
     recipe: Recipe,
     plan: Option<Plan>,
     started: bool,
-    pre_speed: f32,
+    /// The last row's hull speeds; none before the capture's first row.
+    last: Option<Speeds>,
     impact: Option<Value>,
     impact_tick: Option<u64>,
     resting_s: f64,
@@ -107,6 +120,88 @@ pub(super) struct Ram {
 pub(super) struct RamWork {
     work: NamedCounts,
     contacts: ContactTick,
+    hull: HullRow,
+}
+
+/// A row's hull speeds, m/s.
+#[derive(Clone, Copy)]
+struct Speeds {
+    forward: f32,
+    horizontal: f32,
+}
+
+/// The ram's tank after one tick's physics step, and what moved it along its forward over that
+/// step. The belts' implicit support and traction (`contact_transfer`, IMPLICIT CONTACTS) and
+/// gravity are no channel, so the channels do not sum to the hull's momentum change.
+#[derive(Serialize)]
+pub(super) struct HullRow {
+    position_m: [f32; 3],
+    velocity_m_s: [f32; 3],
+    /// Along the hull's forward.
+    forward_m_s: f32,
+    /// This row's `forward_m_s` less the last row's; none on the capture's first row.
+    forward_change_m_s: Option<f32>,
+    /// The hull's position along the recipe heading from the map origin, m.
+    along_m: f32,
+    /// The parsed throttle and steer the step drove with.
+    drive: [f32; 2],
+    /// Belt surface speeds, left and right.
+    belt_m_s: [f32; 2],
+    solver_ns: Channels,
+    /// The sweep's exchange into the hull along its forward, N s.
+    sweep_ns: f32,
+    /// The sweep's verdict on each cut the hull met, `[demand, capacity]`, N.
+    verdicts_n: Vec<[f32; 2]>,
+}
+
+/// Solver momentum into the hull along its forward over one step, N s, by the other body.
+#[derive(Serialize, Default, Clone, Copy, Debug)]
+struct Channels {
+    /// A standing construction.
+    standing: f32,
+    /// A debris piece.
+    piece: f32,
+    /// The ground or any other body.
+    other: f32,
+    /// A body retired between the step and the row (module doc, HULL).
+    retired: f32,
+}
+
+impl std::ops::Add for Channels {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self {
+            standing: self.standing + other.standing,
+            piece: self.piece + other.piece,
+            other: self.other + other.other,
+            retired: self.retired + other.retired,
+        }
+    }
+}
+
+impl HullRow {
+    /// The solver and the sweep keep every state finite; a reading that is not is a bug.
+    fn assert_finite(&self, tick: u64) {
+        let s = self.solver_ns;
+        let fields: [(&str, &[f32]); 9] = [
+            ("position_m", &self.position_m),
+            ("velocity_m_s", &self.velocity_m_s),
+            ("forward_m_s", &[self.forward_m_s]),
+            ("forward_change_m_s", self.forward_change_m_s.as_slice()),
+            ("along_m", &[self.along_m]),
+            ("drive", &self.drive),
+            ("belt_m_s", &self.belt_m_s),
+            ("solver_ns", &[s.standing, s.piece, s.other, s.retired]),
+            ("sweep_ns", &[self.sweep_ns]),
+        ];
+        let verdicts = self.verdicts_n.iter().map(|v| ("verdicts_n", v.as_slice()));
+        for (field, values) in fields.into_iter().chain(verdicts) {
+            assert!(
+                values.iter().all(|v| v.is_finite()),
+                "ram row {tick}: hull.{field} is not finite: {values:?}"
+            );
+        }
+    }
 }
 
 pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
@@ -135,7 +230,6 @@ pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
 fn install_recipe(app: &mut App, recipe: Recipe) {
     app.insert_resource(Ram::new(recipe));
     app.add_systems(PostStartup, prepare);
-    app.add_systems(FixedFirst, sample_speed);
 }
 
 /// DERIVED ideal run-up: d = v²/(2a), a = T_peak * top_reduction / (r * mass).
@@ -171,14 +265,15 @@ impl Recipe {
             .iter()
             .find(|i| i.id == self.instance)
             .ok_or_else(|| invalid("instance must name a construction in the active map"))?;
-        if !matches!(
-            manifest.prototypes[&instance.prototype],
-            Prototype::Construction { .. }
-        ) {
+        let Prototype::Construction { asset } = &manifest.prototypes[&instance.prototype] else {
             return Err(invalid(
                 "instance must name a construction in the active map",
             ));
-        }
+        };
+        let kind = manifest
+            .constructions
+            .get(asset)
+            .expect("map load resolved every construction its instances name");
         let (runup_m, governed_m_s) = runup(spec, self.runup_margin as f32);
         let rotation =
             Quat::from_rotation_y(self.heading_deg.rem_euclid(360.0).to_radians() as f32);
@@ -190,13 +285,21 @@ impl Recipe {
                 "derived run-up is outside spawn bounds; choose another approach or instance",
             ));
         }
-        let spawn = spawn_pos(height, xz, stance(rotation));
+        let stance = stance(rotation);
+        let spawn = spawn_pos(height, xz, stance);
+        let pose = Transform::from_isometry(instance.pose.at_height(0.0));
+        let (min, max) = kind.bounds();
+        let far = (0..8)
+            .map(|k| Vec3::select(BVec3::new(k & 1 > 0, k & 2 > 0, k & 4 > 0), max, min))
+            .map(|corner| pose.transform_point(corner).dot(direction))
+            .fold(f32::NEG_INFINITY, f32::max);
         Ok(Plan {
             spawn: spawn.to_array(),
             rotation: rotation.to_array(),
             runup_m,
             governed_m_s,
             minimum_m_s: f64::from(governed_m_s) * self.minimum_speed_fraction,
+            clear_m: far + stance.reach_m,
         })
     }
 }
@@ -235,7 +338,7 @@ impl Ram {
             recipe,
             plan: None,
             started: false,
-            pre_speed: 0.0,
+            last: None,
             impact: None,
             impact_tick: None,
             resting_s: 0.0,
@@ -261,17 +364,86 @@ impl Ram {
     }
 }
 
-fn sample_speed(mut ram: ResMut<Ram>, tanks: Query<&LinearVelocity, With<Tank>>) {
-    // Before the first tank spawn there is no velocity to sample.
-    if let Some(velocity) = tanks.iter().next() {
-        ram.pre_speed = velocity.xz().length();
+/// What a row reads of the ram's tank (module doc, HULL).
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct Hull<'w, 's> {
+    tanks: Query<'w, 's, Entity, With<Tank>>,
+    states: Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Rotation,
+            &'static LinearVelocity,
+            &'static ParsedTankCommand,
+            &'static TrackDrive,
+        ),
+    >,
+    kinds: Query<'w, 's, (Has<Body>, Has<DebrisPiece>)>,
+    contacts: Res<'w, ContactTransfers>,
+    sweep: Res<'w, SweepAccount>,
+}
+
+impl Hull<'_, '_> {
+    /// `tank` now, along unit `heading`, after a row of `last` speeds.
+    fn row(&self, tank: Entity, heading: Vec3, last: Option<Speeds>) -> HullRow {
+        let (position, rotation, velocity, drive, belts) = self
+            .states
+            .get(tank)
+            .expect("a simulated tank has a pose, a velocity, a parsed command and its belts");
+        let forward = rotation.0 * Vec3::NEG_Z;
+        let forward_m_s = velocity.0.dot(forward);
+        let groups: Vec<_> = self.contacts.solver_groups().collect();
+        let kinds = &self.kinds;
+        let solver_ns = groups
+            .par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
+                let mut channels = Channels::default();
+                for point in groups.iter().flat_map(|points| points.iter()) {
+                    let (body, into_hull) = if point.other == tank {
+                        (point.reference, point.impulse)
+                    } else if point.reference == tank {
+                        (point.other, -point.impulse)
+                    } else {
+                        continue; // This constraint moved no momentum into the hull.
+                    };
+                    let channel = match kinds.get(body) {
+                        Ok((true, _)) => &mut channels.standing,
+                        Ok((_, true)) => &mut channels.piece,
+                        Ok(_) => &mut channels.other,
+                        Err(_) => &mut channels.retired,
+                    };
+                    *channel += into_hull.dot(forward);
+                }
+                channels
+            })
+            .into_iter()
+            .fold(Channels::default(), std::ops::Add::add);
+        HullRow {
+            position_m: position.0.to_array(),
+            velocity_m_s: velocity.0.to_array(),
+            forward_m_s,
+            forward_change_m_s: last.map(|last| forward_m_s - last.forward),
+            along_m: position.0.dot(heading),
+            drive: [drive.throttle, drive.steer],
+            belt_m_s: belts.sides.map(|side| side.speed),
+            solver_ns,
+            // The sweep hands the hull the opposite of the impulse it exchanges.
+            sweep_ns: (self.sweep.exchanges.iter())
+                .filter(|(body, ..)| *body == tank)
+                .map(|(_, impulse, _)| -impulse.dot(forward))
+                .sum(),
+            verdicts_n: (self.sweep.samples.iter())
+                .filter(|(body, ..)| *body == tank)
+                .map(|(_, _, _, (demand, capacity, ..))| [*demand, *capacity])
+                .collect(),
+        }
     }
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct Census<'w, 's> {
     ram: Option<ResMut<'w, Ram>>,
-    tanks: Query<'w, 's, Entity, With<Tank>>,
+    hull: Hull<'w, 's>,
     pieces: Query<
         'w,
         's,
@@ -464,7 +636,7 @@ impl Census<'_, '_> {
             sweep_sources: self.sweep.sources,
             sweep_casts: self.sweep.work.casts,
             awake: self.pieces.iter().len(),
-            tanks: self.tanks.iter().len(),
+            tanks: self.hull.tanks.iter().len(),
             dt_s: dt,
             avian: self.avian.step(),
         }
@@ -494,7 +666,29 @@ impl Census<'_, '_> {
             ram.target = Some(target);
             target
         };
-        let row = ram.trace.push(sample, RamWork { work, contacts });
+        let Ok(tank) = self.hull.tanks.single() else {
+            ram.done = Some(End::WorldChanged);
+            return None;
+        };
+        let plan = ram.plan.as_ref().expect("a started capture has its plan");
+        let hull = self.hull.row(
+            tank,
+            Quat::from_array(plan.rotation) * Vec3::NEG_Z,
+            ram.last,
+        );
+        hull.assert_finite(ram.trace.next_tick());
+        let entering = ram.last.replace(Speeds {
+            forward: hull.forward_m_s,
+            horizontal: Vec2::new(hull.velocity_m_s[0], hull.velocity_m_s[2]).length(),
+        });
+        let row = ram.trace.push(
+            sample,
+            RamWork {
+                work,
+                contacts,
+                hull,
+            },
+        );
         let tick = row.tick;
         if ram.impact_tick.is_none() {
             // First contact is the tank's first touch by either path: the hull sweep, which runs
@@ -507,13 +701,12 @@ impl Census<'_, '_> {
                 .2
                 .construction;
             let groups: Vec<_> = self.contacts.groups().collect();
-            let tanks = &self.tanks;
             let solver = groups
                 .par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
                     groups
                         .iter()
                         .flat_map(|points| points.iter())
-                        .filter(|point| point.reference == target && tanks.contains(point.other))
+                        .filter(|point| point.reference == target && point.other == tank)
                         .map(|point| point.closing_speed)
                         .reduce(f32::max)
                 })
@@ -523,15 +716,14 @@ impl Census<'_, '_> {
                 .sweep
                 .contacts
                 .iter()
-                .filter(|((body, construction), _)| {
-                    *construction == ordinal && tanks.contains(*body)
-                })
+                .filter(|((body, construction), _)| *construction == ordinal && *body == tank)
                 .map(|(_, &speed)| speed);
             if let Some(normal_speed) = solver.chain(swept).reduce(f32::max) {
                 ram.impact_tick = Some(tick);
-                ram.impact = Some(
-                    json!({"tick": tick, "speed_m_s": ram.pre_speed, "normal_speed_m_s": normal_speed}),
-                );
+                // The speed entering the contact step: the last row's, none on the first row.
+                ram.impact = Some(json!({"tick": tick,
+                    "speed_m_s": entering.map(|speeds| speeds.horizontal),
+                    "normal_speed_m_s": normal_speed}));
             }
         }
         if let Some(impact_tick) = ram.impact_tick {
@@ -769,24 +961,37 @@ mod tests {
             runup_m: 1.0,
             governed_m_s: 1.0,
             minimum_m_s: 1.0,
+            clear_m: 1.0,
         });
         ram.started = true;
         ram
     }
 
-    /// The admission gate reads the speed at first contact, from either path: a tank's sweep
-    /// touch on the target alone sets the impact tick, at the sweep's closing speed. Another
-    /// body's touch and the tank's touch on another construction are not the ram's impact.
+    /// A tank at rest at the origin, moving at `velocity`.
+    fn spawn_tank(world: &mut World, velocity: Vec3) -> Entity {
+        world
+            .spawn((
+                Tank,
+                Position::default(),
+                Rotation::default(),
+                LinearVelocity(velocity),
+            ))
+            .id()
+    }
+
+    /// The admission gate reads the speed entering first contact, the last row's, from either
+    /// path: a tank's sweep touch on the target alone sets the impact tick, at the sweep's closing
+    /// speed. Another body's touch and the tank's touch on another construction are not the ram's
+    /// impact. A mutant reading the contact row's own speed reads what the contact left.
     #[test]
     fn a_sweep_touch_before_any_solver_contact_sets_the_impact_tick() {
         let mut world = World::new();
         world.init_resource::<ContactTransfers>();
         world.init_resource::<SweepAccount>();
-        let mut ram = armed();
-        ram.pre_speed = 10.0; // Fixture: FixedFirst's sample of the tank.
+        let ram = armed();
         let instance = ram.recipe.instance.clone();
         world.insert_resource(ram);
-        let tank = world.spawn(Tank).id();
+        let tank = spawn_tank(&mut world, Vec3::NEG_Z * 10.0); // Fixture: the run-up's speed.
         let other = world.spawn_empty().id();
         // Fixture: the target is construction 3; construction 4 is another.
         world.spawn((
@@ -799,7 +1004,9 @@ mod tests {
         ));
         assert!(record(&mut world));
         assert_eq!(world.resource::<Ram>().impact_tick, None);
-        // Fixture closing speeds, m/s; only the tank's touch on the target is the impact.
+        // Fixture: the contact step leaves 7 m/s; closing speeds, m/s, of which only the tank's
+        // touch on the target is the impact.
+        world.get_mut::<LinearVelocity>(tank).unwrap().0 = Vec3::NEG_Z * 7.0;
         world.resource_mut::<SweepAccount>().contacts =
             [((tank, 3), 9.5), ((other, 3), 12.0), ((tank, 4), 11.0)].into();
         assert!(record(&mut world));
@@ -823,7 +1030,7 @@ mod tests {
             ram.recipe.approach_s = 2.0; // Fixture: two one-second census ticks.
             let instance = ram.recipe.instance.clone();
             world.insert_resource(ram);
-            let tank = world.spawn(Tank).id();
+            let tank = spawn_tank(&mut world, Vec3::ZERO);
             world.spawn((
                 Body,
                 MapInstance {
@@ -987,13 +1194,6 @@ mod tests {
                     wall_impulse,
                 ));
             }
-            // Fixture: the ticks whose hull momentum change is attributed, past the +3 at which
-            // the hull meets the house only through rubble.
-            if let Some(after) = contact.map(|first| tick - first)
-                && (1..=5).contains(&after)
-            {
-                momentum_sources(&app, tank, (target, ordinal), before).check(after);
-            }
             let exempt = app.world().resource::<Unjudged>().exempt;
             if exempt != Vec3::ZERO {
                 exempted.push((tick, exempt));
@@ -1051,6 +1251,14 @@ mod tests {
                     losses.push((before.length(), after.length(), impulse.length()));
                 }
             }
+            // Fixture: the ticks whose hull momentum change is attributed, past the +3 at which
+            // the hull meets the house only through rubble.
+            if let Some(after) = contact.map(|first| tick - first)
+                && (1..=5).contains(&after)
+            {
+                let row = ram_row(&mut app, tank);
+                momentum_sources(&app, tank, (target, ordinal), before).check(after, row);
+            }
             if let Some(after) = contact.map(|first| tick - first)
                 && (1..=10).contains(&after)
             {
@@ -1107,8 +1315,23 @@ mod tests {
         unattributed: Vec3,
     }
 
+    /// The ram row after this tick, read as the census reads it, and the hull's forward.
+    fn ram_row(app: &mut App, tank: Entity) -> (HullRow, Vec3) {
+        use bevy::ecs::system::RunSystemOnce;
+        let row = (app.world_mut())
+            .run_system_once(move |hull: Hull| hull.row(tank, Vec3::NEG_Z, None))
+            .unwrap();
+        (
+            row,
+            app.world().get::<Rotation>(tank).unwrap().0 * Vec3::NEG_Z,
+        )
+    }
+
     impl MomentumSources {
-        fn check(&self, after: usize) {
+        /// Every source of the step's momentum change is named, and the ram row's channels,
+        /// along the hull's forward, are those sources: the ram investigation relies on them to
+        /// say which matter moved the hull.
+        fn check(&self, after: usize, (row, forward): (HullRow, Vec3)) {
             println!(
                 "MEASURED hull momentum change at impact +{after}, N s: change {}, sweep {}, belts {}, gravity {}, target {} ({} through chunk colliders: {} judged by a cut, {} unjudged), rubble {}, ground {}, unattributed {}; target into rubble {}",
                 self.change,
@@ -1140,6 +1363,19 @@ mod tests {
                 "every source of the hull's momentum change is named at impact +{after}: {} N s left",
                 self.unattributed
             );
+            let s = row.solver_ns;
+            for (channel, read, owned) in [
+                ("standing", s.standing, self.target),
+                ("pieces", s.piece + s.retired, self.rubble),
+                ("other", s.other, self.ground),
+                ("sweep", row.sweep_ns, self.sweep),
+            ] {
+                assert!(
+                    (read - owned.dot(forward)).abs() <= 1e-4 * scale,
+                    "the row's {channel} channel reads this step's momentum at impact +{after}: {read} against {} N s",
+                    owned.dot(forward)
+                );
+            }
         }
     }
 

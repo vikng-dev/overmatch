@@ -634,9 +634,18 @@ def ram_rows(text, recipe):
             ticks, sends = read_tick_samples([ram], 1, ticks, sends)
             if not isinstance(ram["pieces"]["records"], list):
                 raise ValueError("invalid pieces.records")
+            for tick in ticks[len(ticks) - len(ram["ticks"]):]:
+                hull = tick["hull"]
+                for field in ("forward_m_s", "along_m"):
+                    finite(hull[field], f"hull.{field}")
+                if tick["tick"] == 1:
+                    if hull["forward_change_m_s"] is not None:
+                        raise ValueError("invalid hull.forward_change_m_s: the first row has no previous row")
+                else:
+                    finite(hull["forward_change_m_s"], "hull.forward_change_m_s")
             plan, impact = ram["plan"], ram["impact"]
             if plan is not None:
-                for field in ("runup_m", "governed_m_s", "minimum_m_s"):
+                for field in ("runup_m", "governed_m_s", "minimum_m_s", "clear_m"):
                     finite(plan[field], f"plan.{field}")
                     if plan[field] < 0:
                         raise ValueError(f"invalid plan.{field}: expected nonnegative distance or speed")
@@ -650,6 +659,8 @@ def ram_rows(text, recipe):
             if impact is not None:
                 if isinstance(impact["tick"], bool) or not isinstance(impact["tick"], int) or not 0 < impact["tick"] <= len(ticks):
                     raise ValueError("invalid impact.tick: expected a captured tick")
+                if impact["speed_m_s"] is None:
+                    raise RuntimeError("ram contact on the capture's first tick: no run-up speed was measured")
                 for field in ("speed_m_s", "normal_speed_m_s"):
                     finite(impact[field], f"impact.{field}")
             rows.append(row)
@@ -765,6 +776,16 @@ def match_tick_summary(rows, recipe):
                 over_budget_ticks=[tick_attribution(t) for t in ticks if t["tick_us"] > t["dt_s"]*1e6])
 
 
+HULL_DEFINITIONS = dict(
+    forward_change_m_s="a row's forward speed minus the previous row's, m/s; no m/s² reading",
+    min_forward_m_s="the least forward speed from the contact tick on, m/s",
+    largest_forward_change_m_s="the one-tick forward speed change of greatest size from the contact tick on, signed, m/s",
+    crossing_s="from the contact tick to the first tick the hull's position along the recipe heading reaches plan.clear_m "
+               "(the construction's far bound plus the tank's stance reach, so its rear has cleared); null when the capture ends first",
+    stall_s="seconds from the contact tick on with forward speed <= 0",
+)
+
+
 def ram_summary(text, recipe):
     rows, ticks, sends, last = ram_rows(text, recipe)
     if last is None:
@@ -792,7 +813,14 @@ def ram_summary(text, recipe):
     ordered = sorted(t["tick_us"] for t in window)
     send_us = sum(s["us"] for s in sends if window[0]["tick"] <= s["tick"] <= window[-1]["tick"])
     worst = max(window, key=lambda t: t["tick_us"])
+    hulls = [t["hull"] for t in window]
+    crossing = next((t["tick"] for t in window if t["hull"]["along_m"] >= plan["clear_m"]), None)
     return dict(recipe=recipe, plan=plan, impact=impact, end=last["done"],
+                min_forward_m_s=min(h["forward_m_s"] for h in hulls),
+                largest_forward_change_m_s=max((h["forward_change_m_s"] for h in hulls), key=abs),
+                crossing_s=None if crossing is None else (crossing - impact["tick"])*dt,
+                stall_s=sum(h["forward_m_s"] <= 0 for h in hulls)*dt,
+                definitions=HULL_DEFINITIONS,
                 first_tick=window[0]["tick"], last_tick=window[-1]["tick"], window_s=len(window)*dt,
                 worst_tick=worst, p99_us=ordered[math.ceil(0.99*len(ordered))-1],
                 worst_tick_attribution=tick_attribution(worst),
@@ -811,7 +839,7 @@ def ram_summary(text, recipe):
 
 def report_ram(result):
     report_core_balance(result["rows"])
-    compact = {k: v for k, v in result.items() if k not in ("ticks", "rows", "piece_census")}
+    compact = {k: v for k, v in result.items() if k not in ("ticks", "rows", "piece_census", "definitions")}
     print("MEASURED ram (shared physics; send outside fixed ticks): " + json.dumps(compact), flush=True)
 
 

@@ -47,3 +47,11 @@ On Linux, `linux_host.host_probe_us` exposes the periodic `/proc` walk outside `
 Lifecycle observations between fixed ticks are reported as `piece_census.lifecycle_outside_tick_us`,
 separate from additive tick leaves. `awake_ticks` remains a piece's cumulative awake duration;
 completed episodes retain their own immutable snapshots.
+
+Each ram row's `hull` is the tank after that tick's physics step, and what moved it along its own
+forward over the step (`src/net/ram.rs`, `HullRow`): solver momentum by the other body's kind and
+the sweep's exchange, N s, and the sweep's verdicts on the cuts the hull met. The belts' implicit
+support and traction and gravity are not channels, so the channels do not sum to m·Δv.
+`impact.speed_m_s` is the horizontal speed of the row before first contact. `result.json` adds
+`min_forward_m_s`, `largest_forward_change_m_s`, `crossing_s` and `stall_s`, from the contact tick
+on, each defined in its `definitions`.
