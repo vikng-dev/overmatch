@@ -1289,7 +1289,8 @@ mod tests {
                 Rotation::default(),
                 Collider::cuboid(1.0, 1.0, 1.0),
                 SleepingDisabled,
-                CollisionLayers::NONE,
+                // The reach counts only bodies whose layers let them touch.
+                crate::construction::breakage::piece_layers(),
             ));
             if debris {
                 body.insert(DebrisPiece);
