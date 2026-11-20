@@ -372,3 +372,22 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    /// Contact iteration must not allocate for a block that fits its inline storage.
+    #[test]
+    fn small_contact_push_stays_on_the_stack() {
+        // Fixture: free moving coordinates, inertia and one finite contact impulse.
+        let mut coordinates = free_fixture([1.0, -1.0], 1000.0);
+        let allocations = crate::tests::alloc_count::allocations_in(|| {
+            coordinates.push(0, 10.0);
+        });
+        assert_eq!(
+            allocations, 0,
+            "small-block contact iteration must not enter the allocator"
+        );
+    }
+}

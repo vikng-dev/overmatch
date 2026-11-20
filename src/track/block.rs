@@ -8,6 +8,13 @@
 //! nonunique. Static bounds may only shrink to dynamic
 //! bounds within a call. The drivetrain design owns the mechanism narrative.
 
+use smallvec::{SmallVec, smallvec};
+
+/// Resolution: eight inline entries keep small KKT blocks and their augmented rows on the
+/// stack. Larger constructions spill to the heap; this is a storage choice, never a row limit.
+const INLINE_CAPACITY: usize = 8;
+pub(crate) type Inline<T> = SmallVec<[T; INLINE_CAPACITY]>;
+
 /// Resolution: relative roundoff allowance for rank, impulse bounds and row signs in f64.
 /// It resolves elimination error, never a physical rest-speed band.
 const RESOLUTION: f64 = 1e-11;
@@ -30,7 +37,7 @@ pub(crate) struct Bounds {
 /// when its starting row speed equals `target` exactly. Nonstatic elements use `bounds` alone.
 #[derive(Clone, Debug)]
 pub(crate) struct Row {
-    pub jacobian: Vec<f64>,
+    pub jacobian: Inline<f64>,
     pub target: f64,
     pub bounds: Bounds,
     pub dynamic: Option<Bounds>,
@@ -72,24 +79,24 @@ pub(crate) struct RowResult {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Solution {
-    pub speeds: Vec<f64>,
-    pub rows: Vec<RowResult>,
+    pub speeds: Inline<f64>,
+    pub rows: Inline<RowResult>,
     /// Deterministic work across every static-to-dynamic stage.
     #[cfg(feature = "bitprobe")]
     pub assignments_tried: usize,
-    assignment: Vec<State>,
+    assignment: Inline<State>,
 }
 
 /// Affine response while a bounded block stays on one KKT face.
 #[derive(Clone, Debug)]
 pub(crate) struct FaceResponse {
-    pub(crate) mobility: Vec<Vec<f64>>,
+    pub(crate) mobility: Inline<Inline<f64>>,
 }
 
 struct FaceSystem {
-    interior: Vec<usize>,
-    active: Vec<usize>,
-    matrix: Vec<Vec<f64>>,
+    interior: Inline<usize>,
+    active: Inline<usize>,
+    matrix: Inline<Inline<f64>>,
 }
 
 fn face_system(
@@ -98,15 +105,15 @@ fn face_system(
     limits: &[ImpulseLimit],
     states: &[State],
 ) -> FaceSystem {
-    let interior: Vec<_> = (0..rows.len())
+    let interior: Inline<_> = (0..rows.len())
         .filter(|&i| states[i] == State::Interior)
         .collect();
-    let active: Vec<_> = (0..limits.len())
+    let active: Inline<_> = (0..limits.len())
         .filter(|&i| states[rows.len() + i] != State::Interior)
         .collect();
     let nf = interior.len();
     let size = nf + active.len();
-    let mut matrix = vec![vec![0.0; size + 1]; size];
+    let mut matrix: Inline<Inline<f64>> = smallvec![smallvec![0.0; size + 1]; size];
     for (i, &ri) in interior.iter().enumerate() {
         for (j, &rj) in interior.iter().enumerate() {
             matrix[i][j] = rows[ri]
@@ -150,7 +157,7 @@ impl Solution {
         } = face_system(speeds, rows, limits, &self.assignment);
         let nf = interior.len();
         let size = matrix.len();
-        let mut mobility = Vec::with_capacity(speeds.len());
+        let mut mobility = Inline::with_capacity(speeds.len());
         for column in 0..speeds.len() {
             let mut matrix = matrix.clone();
             for (i, &ri) in interior.iter().enumerate() {
@@ -192,7 +199,7 @@ fn physical_equalities(
     limits: &[ImpulseLimit],
     states: &[State],
     multipliers: &[f64],
-) -> Vec<usize> {
+) -> Inline<usize> {
     (0..rows.len())
         .filter(|&i| {
             states[i] == State::Interior
@@ -297,13 +304,13 @@ fn check_face(
 /// Bounds and targets may move; each trial still checks feasibility and optimality afresh.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WarmStart {
-    layout: Vec<(Vec<f64>, bool)>,
-    limits: Vec<Vec<f64>>,
-    assignment: Vec<State>,
+    layout: Inline<(Inline<f64>, bool)>,
+    limits: Inline<Inline<f64>>,
+    assignment: Inline<State>,
 }
 
 impl WarmStart {
-    fn seed(&mut self, rows: &[Row], limits: &[ImpulseLimit]) -> Vec<State> {
+    fn seed(&mut self, rows: &[Row], limits: &[ImpulseLimit]) -> Inline<State> {
         let matches = self.layout.len() == rows.len()
             && self.limits.len() == limits.len()
             && self
@@ -324,7 +331,7 @@ impl WarmStart {
                 .map(|r| (r.jacobian.clone(), r.dynamic.is_some()))
                 .collect();
             self.limits = limits.iter().map(|l| l.coefficients.clone()).collect();
-            self.assignment = vec![State::Interior; rows.len() + limits.len()];
+            self.assignment = smallvec![State::Interior; rows.len() + limits.len()];
         }
         self.assignment.clone()
     }
@@ -349,7 +356,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// row when combinations are supplied, so the feasible polytope is nonempty in every regime.
 #[derive(Clone, Debug)]
 pub(crate) struct ImpulseLimit {
-    pub coefficients: Vec<f64>,
+    pub coefficients: Inline<f64>,
     pub bounds: Bounds,
 }
 
@@ -389,8 +396,8 @@ pub(crate) fn solve_limited(
             && s.free_impulse.is_finite()),
         "block speeds have finite state and positive finite inertia"
     );
-    let start: Vec<_> = speeds.iter().map(|s| s.value).collect();
-    let free: Vec<_> = speeds
+    let start: Inline<_> = speeds.iter().map(|s| s.value).collect();
+    let free: Inline<_> = speeds
         .iter()
         .map(|s| s.value + s.free_impulse / s.inertia)
         .collect();
@@ -398,8 +405,8 @@ pub(crate) fn solve_limited(
         free.iter().all(|v| v.is_finite()),
         "finite block impulses over admitted inertias produce finite free speeds"
     );
-    let mut bounds = Vec::with_capacity(rows.len());
-    let mut dynamic = vec![false; rows.len()];
+    let mut bounds = Inline::with_capacity(rows.len());
+    let mut dynamic: Inline<bool> = smallvec![false; rows.len()];
     for (i, row) in rows.iter().enumerate() {
         assert!(
             row.jacobian.len() == speeds.len()
@@ -451,7 +458,7 @@ pub(crate) fn solve_limited(
         };
         let mut result = (0..=seed.len())
             .find_map(|distance| {
-                search.neighbours(&seed, &mut Vec::with_capacity(rows.len()), distance)
+                search.neighbours(&seed, &mut Inline::with_capacity(rows.len()), distance)
             })
             .expect("the loaded metric must leave an optimal independent KKT basis above the rank threshold; admission certifies only unloaded conditioning");
         #[cfg(feature = "bitprobe")]
@@ -497,7 +504,7 @@ impl Search<'_> {
     fn neighbours(
         &self,
         seed: &[State],
-        states: &mut Vec<State>,
+        states: &mut Inline<State>,
         distance: usize,
     ) -> Option<Solution> {
         let i = states.len();
@@ -545,14 +552,14 @@ impl Search<'_> {
             active,
             mut matrix,
         } = face_system(self.speeds, self.rows, self.limits, states);
-        let mut impulses: Vec<_> = (0..n)
+        let mut impulses: Inline<_> = (0..n)
             .map(|i| match states[i] {
                 State::Interior => 0.0,
                 State::Lower => self.bounds[i].lower,
                 State::Upper => self.bounds[i].upper,
             })
             .collect();
-        let velocity_for = |impulses: &[f64]| -> Vec<f64> {
+        let velocity_for = |impulses: &[f64]| -> Inline<f64> {
             self.speeds
                 .iter()
                 .enumerate()
@@ -594,7 +601,7 @@ impl Search<'_> {
             impulses[i] = p;
         }
         let mut velocity = velocity_for(&impulses);
-        let mut multipliers = vec![0.0; self.limits.len()];
+        let mut multipliers: Inline<f64> = smallvec![0.0; self.limits.len()];
         for (&j, &mu) in active.iter().zip(&answer[nf..]) {
             multipliers[j] = mu;
         }
@@ -612,13 +619,13 @@ impl Search<'_> {
         let snapped = physical_equalities(self.rows, self.limits, states, &multipliers);
         // Only zero-multiplier physical equalities can be snapped. Aggregate-constrained
         // interior rows may slide; their KKT equality includes the limit's shadow price.
-        let mut independent = Vec::new();
+        let mut independent = Inline::new();
         for &i in &snapped {
             independent.push(i);
-            let mut gram: Vec<Vec<f64>> = independent
+            let mut gram: Inline<Inline<f64>> = independent
                 .iter()
                 .map(|&a| {
-                    let mut line: Vec<_> = independent
+                    let mut line: Inline<_> = independent
                         .iter()
                         .map(|&b| {
                             self.rows[a]
@@ -646,7 +653,7 @@ impl Search<'_> {
         Some(Solution {
             #[cfg(feature = "bitprobe")]
             assignments_tried: 0,
-            assignment: states.to_vec(),
+            assignment: states.iter().copied().collect(),
             speeds: velocity,
             rows: impulses
                 .into_iter()
@@ -662,9 +669,9 @@ impl Search<'_> {
 /// Symmetric equilibration preserves row-unit invariance in the indefinite KKT system.
 /// Free impulses use their inertial norms; multipliers use their constraint's norm in those
 /// coordinates. A zero-inertia objective coordinate must be fixed by an active combination.
-fn eliminate_bordered(matrix: &mut [Vec<f64>], interior: usize) -> Option<Vec<f64>> {
+fn eliminate_bordered(matrix: &mut [Inline<f64>], interior: usize) -> Option<Inline<f64>> {
     let n = matrix.len();
-    let mut norms = vec![0.0; n];
+    let mut norms: Inline<f64> = smallvec![0.0; n];
     for i in 0..interior {
         norms[i] = matrix[i][i].sqrt();
         if norms[i] == 0.0 {
@@ -711,7 +718,7 @@ fn eliminate_bordered(matrix: &mut [Vec<f64>], interior: usize) -> Option<Vec<f6
             }
         }
     }
-    let mut answer = vec![0.0; n];
+    let mut answer = smallvec![0.0; n];
     for i in (0..n).rev() {
         answer[i] = (matrix[i][n] - dot(&matrix[i][i + 1..n], &answer[i + 1..n])) / matrix[i][i];
     }
@@ -730,7 +737,7 @@ pub(super) fn conditioning_resolvable(
     limited_coordinate: usize,
 ) -> bool {
     for mask in 1usize..(1 << rows.len()) {
-        let free: Vec<_> = (0..rows.len()).filter(|i| mask & (1 << i) != 0).collect();
+        let free: Inline<_> = (0..rows.len()).filter(|i| mask & (1 << i) != 0).collect();
         let nf = free.len();
         let independent = match free.as_slice() {
             [a] => rows[*a].iter().any(|x| *x != 0.0),
@@ -754,7 +761,7 @@ pub(super) fn conditioning_resolvable(
                 continue;
             }
             let size = nf + usize::from(active);
-            let mut matrix = vec![vec![0.0; size + 1]; size];
+            let mut matrix: Inline<Inline<f64>> = smallvec![smallvec![0.0; size + 1]; size];
             for (i, &a) in free.iter().enumerate() {
                 for (j, &b) in free.iter().enumerate() {
                     matrix[i][j] = rows[a]
@@ -781,7 +788,7 @@ pub(super) fn conditioning_resolvable(
 /// writes 0.0 directly and an equal-weight zero mean writes one speed as the other's negative.
 fn snap(velocity: &mut [f64], rows: &[Row], stuck: &[usize]) {
     let n = velocity.len();
-    let mut equations: Vec<_> = stuck
+    let mut equations: Inline<_> = stuck
         .iter()
         .map(|&i| {
             let mut line = rows[i].jacobian.clone();
@@ -789,7 +796,7 @@ fn snap(velocity: &mut [f64], rows: &[Row], stuck: &[usize]) {
             line
         })
         .collect();
-    let mut pivots = Vec::with_capacity(stuck.len());
+    let mut pivots = Inline::with_capacity(stuck.len());
     for col in 0..n {
         let at = pivots.len();
         if at == equations.len() {

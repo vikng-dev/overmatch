@@ -1558,7 +1558,10 @@ fn passive_rows(
                 .expect("a constructed mean stop has its own admitted rating"),
         ) * f64::from(inp.dt);
         rows.push(Row {
-            jacobian: Coupling::Stop(Output::Mean).jacobian(0.0, 0.0).to_vec(),
+            jacobian: Coupling::Stop(Output::Mean)
+                .jacobian(0.0, 0.0)
+                .into_iter()
+                .collect(),
             target: 0.0,
             bounds: symmetric(rating * f64::from(tp.brake_static_factor)),
             dynamic: Some(symmetric(rating)),
@@ -1591,7 +1594,7 @@ fn passive_rows(
                 };
                 let lever = st.park || (!controls.service && !inner);
                 rows.push(Row {
-                    jacobian: coupling.jacobian(0.0, 0.0).to_vec(),
+                    jacobian: coupling.jacobian(0.0, 0.0).into_iter().collect(),
                     target: 0.0,
                     bounds: bounds(if lever {
                         capacity * f64::from(tp.brake_static_factor)
@@ -1666,7 +1669,7 @@ pub(crate) struct MechanicalRows {
 
 impl MechanicalRows {
     pub(crate) fn solve(&self, impulses: [f64; 2], warm: &mut WarmStart) -> super::block::Solution {
-        let mut speeds = self.speeds.clone();
+        let mut speeds: super::block::Inline<_> = self.speeds.iter().copied().collect();
         for (speed, impulse) in speeds[1..].iter_mut().zip(impulses) {
             speed.free_impulse += impulse;
         }
@@ -1736,7 +1739,10 @@ fn prepare_rows(
                 let upper = if open { 0.0 } else { capacity };
                 clutches.push(rows.len());
                 rows.push(Row {
-                    jacobian: coupling.jacobian(dir * k, signed_steer).to_vec(),
+                    jacobian: coupling
+                        .jacobian(dir * k, signed_steer)
+                        .into_iter()
+                        .collect(),
                     target: 0.0,
                     bounds: Bounds { lower, upper },
                     dynamic: None,
@@ -1746,7 +1752,10 @@ fn prepare_rows(
             Coupling::Steering => {
                 steering = Some(rows.len());
                 rows.push(Row {
-                    jacobian: coupling.jacobian(dir * k, signed_steer).to_vec(),
+                    jacobian: coupling
+                        .jacobian(dir * k, signed_steer)
+                        .into_iter()
+                        .collect(),
                     target: 0.0,
                     bounds: symmetric(steering_capacity),
                     dynamic: None,
@@ -1770,7 +1779,7 @@ fn prepare_rows(
         }) {
             let weights = output.weights();
             rows.push(Row {
-                jacobian: vec![0.0, dir * weights[0], dir * weights[1]],
+                jacobian: smallvec::smallvec![0.0, dir * weights[0], dir * weights[1]],
                 target: f64::from(tp.engine.crank_limit_rpm * RPM_TO_RAD) / k,
                 bounds: Bounds {
                     lower: -capacity / weights[0].max(weights[1]),

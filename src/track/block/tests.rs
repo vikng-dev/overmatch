@@ -12,7 +12,7 @@ fn speed(value: f64, inertia: f64, free_impulse: f64) -> Speed {
 
 fn row(jacobian: &[f64], capacity: f64) -> Row {
     Row {
-        jacobian: jacobian.to_vec(),
+        jacobian: jacobian.iter().copied().collect(),
         target: 0.0,
         bounds: Bounds {
             lower: -capacity,
@@ -245,7 +245,7 @@ fn a_stop_snaps_to_zero_and_breakaway_uses_dynamic_capacity_in_the_same_step() {
     let stops = [stop];
     let stop = &stops[0];
     let held = solve(&[speed(0.0, 3.0, 5.0)], &stops);
-    assert_eq!(held.speeds, [0.0]);
+    assert_eq!(held.speeds.as_slice(), [0.0]);
     assert_eq!(held.assignment[0], State::Interior);
     assert!(!held.rows[0].dynamic);
     for (initial, impulse) in [(0.0, 7.0), (0.01, 0.0), (-0.01, 0.0), (1.0, 0.0)] {
@@ -288,7 +288,7 @@ fn unequal_loads_share_through_a_differential_and_a_held_mean_is_exact() {
     ];
     let solution = solve(&speeds, &rows);
     certify(&speeds, &rows, &solution);
-    assert_eq!(solution.speeds, [0.0, 0.0]);
+    assert_eq!(solution.speeds.as_slice(), [0.0, 0.0]);
     assert_ne!(solution.rows[0].impulse, 0.0);
     let moving = [speed(1.0, 3.0, 0.0), speed(-0.5, 7.0, 0.0)];
     let mean = [row(&[0.5, 0.5], 10.0)];
@@ -340,7 +340,7 @@ fn independent_rows_with_different_scales_both_stop_their_speeds() {
     let rows = [row(&[1.0, 0.0], 10.0), row(&[0.0, 1e-6], 1e7)];
     let solution = solve(&speeds, &rows);
     certify(&speeds, &rows, &solution);
-    assert_eq!(solution.speeds, [0.0, 0.0]);
+    assert_eq!(solution.speeds.as_slice(), [0.0, 0.0]);
     // Resolution: independently derived cancelling impulses, allowing f64 elimination roundoff.
     for (outcome, expected) in solution.rows.iter().zip([-1.0, -1e6]) {
         assert!((outcome.impulse - expected).abs() <= 1e-10 * expected.abs());
@@ -490,14 +490,14 @@ fn combination_faces_have_checker_certified_optima_including_interior_sliding() 
         rows[1].target = random() - 0.5;
         let mut limits = [
             ImpulseLimit {
-                coefficients: vec![1.0, 0.1 + random()],
+                coefficients: smallvec::smallvec![1.0, 0.1 + random()],
                 bounds: Bounds {
                     lower: -random(),
                     upper: random(),
                 },
             },
             ImpulseLimit {
-                coefficients: vec![-random(), 1.0],
+                coefficients: smallvec::smallvec![-random(), 1.0],
                 bounds: Bounds {
                     lower: -random(),
                     upper: random(),
@@ -508,7 +508,7 @@ fn combination_faces_have_checker_certified_optima_including_interior_sliding() 
             limits[1].coefficients = limits[0].coefficients.iter().map(|c| -2.0 * c).collect();
         }
         if case % 7 == 0 {
-            limits[0].coefficients = vec![1.0, 0.0];
+            limits[0].coefficients = smallvec::smallvec![1.0, 0.0];
         }
         let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
         certify_polygon(&speeds, &rows, &limits, &result);
@@ -518,7 +518,7 @@ fn combination_faces_have_checker_certified_optima_including_interior_sliding() 
     let speeds = [speed(1.0, 1.0, 0.0), speed(1.0, 1.0, 0.0)];
     let rows = [row(&[1.0, 0.0], 2.0), row(&[0.0, 1.0], 2.0)];
     let limits = [ImpulseLimit {
-        coefficients: vec![1.0, 1.0],
+        coefficients: smallvec::smallvec![1.0, 1.0],
         bounds: Bounds {
             lower: -1.0,
             upper: 1.0,
@@ -526,7 +526,7 @@ fn combination_faces_have_checker_certified_optima_including_interior_sliding() 
     }];
     let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
     certify_polygon(&speeds, &rows, &limits, &result);
-    assert_eq!(result.speeds, [0.5, 0.5]);
+    assert_eq!(result.speeds.as_slice(), [0.5, 0.5]);
 }
 
 /// Dependent physical equalities can have unique impulses through a combination constraint.
@@ -536,7 +536,7 @@ fn a_combination_can_resolve_redundant_impulses_without_duplicate_speed_snaps() 
     let speeds = [speed(1.0, 1.0, 0.0)];
     let rows = [row(&[1.0], 2.0), row(&[1.0], 2.0)];
     let limits = [ImpulseLimit {
-        coefficients: vec![1.0, -1.0],
+        coefficients: smallvec::smallvec![1.0, -1.0],
         bounds: Bounds {
             lower: 0.0,
             upper: 0.0,
@@ -544,7 +544,7 @@ fn a_combination_can_resolve_redundant_impulses_without_duplicate_speed_snaps() 
     }];
     let result = solve_limited(&speeds, &rows, &limits, &mut WarmStart::default());
     certify_polygon(&speeds, &rows, &limits, &result);
-    assert_eq!(result.speeds, [0.0]);
+    assert_eq!(result.speeds.as_slice(), [0.0]);
 }
 
 /// A generic caller whose finite inputs overflow the effective mass has broken the numeric
@@ -555,7 +555,7 @@ fn overflowing_combination_system_is_a_visible_bug() {
     let speeds = [speed(0.0, 1e-300, 0.0)];
     let rows = [row(&[1e100], 1.0)]; // Fixture finite inputs whose Gram product overflows f64.
     let limits = [ImpulseLimit {
-        coefficients: vec![1.0],
+        coefficients: smallvec::smallvec![1.0],
         bounds: Bounds {
             lower: -1.0,
             upper: 1.0,
@@ -576,7 +576,7 @@ fn combination_optimality_is_invariant_under_row_impulse_units() {
             row(&[0.0, 1.0 / scale], 2.0 * scale),
         ];
         let limits = [ImpulseLimit {
-            coefficients: vec![scale, 1.0 / scale],
+            coefficients: smallvec::smallvec![scale, 1.0 / scale],
             bounds: Bounds {
                 lower: -1.0,
                 upper: 1.0,
@@ -592,7 +592,7 @@ fn combination_optimality_is_invariant_under_row_impulse_units() {
     linear.target = 1.0;
     let rows = [linear, row(&[1.0], 2.0)];
     let limits = [ImpulseLimit {
-        coefficients: vec![1.0, 0.0],
+        coefficients: smallvec::smallvec![1.0, 0.0],
         bounds: Bounds {
             lower: 0.0,
             upper: 1.0,
@@ -609,7 +609,7 @@ fn singleton_impulses_do_not_create_a_physical_equality_or_roundoff_force() {
     let speeds = [speed(100.0, 1.0, 0.0), speed(0.0, 2.0, 0.0)];
     let rows = [row(&[1.0, -1.0], 0.0), row(&[0.0, 1.0], 10.0)];
     let limits = [ImpulseLimit {
-        coefficients: vec![1.0, 0.0],
+        coefficients: smallvec::smallvec![1.0, 0.0],
         bounds: Bounds {
             lower: 0.0,
             upper: 1.0,
@@ -621,7 +621,7 @@ fn singleton_impulses_do_not_create_a_physical_equality_or_roundoff_force() {
         result.rows.iter().map(|r| r.impulse).collect::<Vec<_>>(),
         [0.0, 0.0]
     );
-    assert_eq!(result.speeds, [100.0, 0.0]);
+    assert_eq!(result.speeds.as_slice(), [100.0, 0.0]);
 }
 
 /// Aggregate units change the dual multiplier inversely. Its sign test must scale with the
@@ -634,7 +634,7 @@ fn combination_units_cannot_accept_the_wrong_optimality_sign() {
         for scale in [1e-12, 1.0, 1e12] {
             // Fixture changes of aggregate units only.
             let limits = [ImpulseLimit {
-                coefficients: vec![scale, scale],
+                coefficients: smallvec::smallvec![scale, scale],
                 bounds: Bounds {
                     lower: -scale,
                     upper: scale,
@@ -659,7 +659,7 @@ fn reference_limited(
     let mut normals: Vec<Vec<f64>> = (0..n)
         .map(|i| (0..n).map(|j| f64::from(i == j)).collect())
         .collect();
-    normals.extend(limits.iter().map(|l| l.coefficients.clone()));
+    normals.extend(limits.iter().map(|l| l.coefficients.to_vec()));
     let free: Vec<_> = speeds
         .iter()
         .map(|s| s.value + s.free_impulse / s.inertia)
@@ -811,7 +811,7 @@ fn n_row_reference_covers_dynamic_restart_and_the_production_topology() {
         ceiling.target = 0.2;
         rows.push(ceiling);
         let limits = [ImpulseLimit {
-            coefficients: vec![1.0, -c, 0.0, 0.0, 0.0],
+            coefficients: smallvec::smallvec![1.0, -c, 0.0, 0.0, 0.0],
             bounds: Bounds {
                 lower: -0.2,
                 upper: 0.4,
@@ -883,7 +883,7 @@ fn accepted_faces_warm_the_next_solve_until_the_layout_changes() {
         free_impulse: 0.0,
     }];
     let mut rows = [Row {
-        jacobian: vec![1.0],
+        jacobian: smallvec::smallvec![1.0],
         target: 0.0,
         bounds: Bounds {
             lower: -1.0,
@@ -935,4 +935,35 @@ fn constrained_mobility_reflects_inertia_and_releases_exhausted_stops() {
             assert!(solved.speeds[1] > 0.0);
         }
     }
+}
+
+/// Constructions beyond inline storage retain the same optimality and exact holding guarantees.
+#[test]
+fn spilled_blocks_preserve_optimality_and_held_mobility() {
+    let count = INLINE_CAPACITY + 1;
+    let speeds: Vec<_> = (0..count)
+        .map(|i| speed(i as f64 + 1.0, 1.0, 0.0))
+        .collect();
+    let rows: Vec<_> = (0..count)
+        .map(|i| {
+            let jacobian: Vec<_> = (0..count).map(|j| f64::from(i == j)).collect();
+            row(&jacobian, count as f64 + 1.0)
+        })
+        .collect();
+    let solved = solve(&speeds, &rows);
+    certify(&speeds, &rows, &solved);
+    assert!(
+        solved.speeds.spilled(),
+        "storage must admit constructions beyond inline capacity"
+    );
+    assert!(solved.speeds.iter().all(|&v| v == 0.0));
+    assert!(
+        solved
+            .response(&speeds, &rows, &[])
+            .mobility
+            .iter()
+            .flatten()
+            .all(|&v| v == 0.0),
+        "contacts rely on held coordinates having exactly zero mobility even after spilling"
+    );
 }
