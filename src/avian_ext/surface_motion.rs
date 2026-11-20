@@ -295,6 +295,10 @@ pub fn solve(
             part.impulse *= coefficient;
             continue;
         }
+        let budget = constraint.friction * point.normal_part.impulse;
+        if budget == 0.0 && part.impulse == Vec2::ZERO {
+            continue; // No active friction or cached momentum to retract.
+        }
         let [r1, r2] = [point.anchor1, point.anchor2];
         let velocity =
             body2.velocity_at_point(r2) - body1.velocity_at_point(r1) + constraint.tangent_velocity;
@@ -317,12 +321,7 @@ pub fn solve(
             previous: part.impulse.as_dvec2(),
             coordinates,
         };
-        let next = metric
-            .minimum(
-                (body1, body2),
-                f64::from(constraint.friction * point.normal_part.impulse),
-            )
-            .as_vec2();
+        let next = metric.minimum((body1, body2), f64::from(budget)).as_vec2();
         let delta = next - part.impulse;
         part.impulse = next;
         let p = tangents[0] * delta.x + tangents[1] * delta.y;
@@ -520,6 +519,43 @@ mod tests {
             }
         }
     }
+    /// A contact that loses its normal budget must retract its cached friction from body and
+    /// surface: Coulomb's bound allows none without load, so the zero-budget skip needs a zero cache.
+    #[test]
+    fn zero_budget_retracts_cached_momentum() {
+        // Fixture: an at-rest free surface and point mass with a cached tangent impulse.
+        let mut row = contact(10_000.0);
+        let mut body = belt_body(0.0, 1.0 / 1000.0);
+        let mut fixed = SolverBody::DUMMY;
+        let inertia = point_mass(10_000.0);
+        row.warm_start(
+            &mut body,
+            &mut fixed,
+            &inertia,
+            &SolverBodyInertia::DUMMY,
+            1.0,
+        );
+        assert_ne!(
+            body.linear_velocity,
+            Vec3::ZERO,
+            "the fixture must apply its cached momentum"
+        );
+        relax(
+            &mut row,
+            &mut body,
+            &mut fixed,
+            &inertia,
+            &SolverBodyInertia::DUMMY,
+        );
+        assert_eq!(
+            row.points[0].tangent_part.as_ref().unwrap().impulse,
+            Vec2::ZERO
+        );
+        assert_eq!(body.linear_velocity, Vec3::ZERO);
+        assert_eq!(surface(&body).contact_impulses(), [0.0; 2]);
+        assert_eq!(surface(&body).speed(0), 0.0);
+    }
+
     /// Belt-on-belt contacts rely on both owners receiving the same solved impulse immediately.
     #[test]
     fn a_contact_updates_both_finite_surfaces() {
@@ -693,7 +729,8 @@ mod tests {
         }
     }
 
-    /// Even an unloaded speculative point must reject a corrupt velocity for its owner.
+    /// A zero-budget point retracting a cached impulse must still reject a corrupt velocity
+    /// before exchanging it with its owner.
     #[test]
     #[should_panic(expected = "finite inertias and contact velocities")]
     fn zero_friction_budget_still_checks_finite_inputs() {
