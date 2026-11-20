@@ -32,11 +32,11 @@
 //! `wake_on_enable_rigid_body`), so the island rests a full `TimeToSleep` again before it can sleep
 //! and freeze. Four causes:
 //! - reach: a mover (an awake body that is not static, and each piece this thaw frees) with a
-//!   collider with mutual layer permission that could contact a frozen piece in this step. Avian makes contacts
-//!   once per step, in the narrow phase, from the poses and linear velocities the step starts
-//!   with, between colliders closer than `max(dt |Δv|, contact tolerance)` plus their collision
-//!   margins (`collision/narrow_phase/system_param.rs`, `update_contacts`). A frozen piece's
-//!   bounds hold its shape grown by the tolerance and its collider's margin
+//!   collider with mutual layer permission that could contact a frozen piece in this step. Avian
+//!   makes contacts once per step, in the narrow phase, from the poses and linear velocities the
+//!   step starts with, between colliders closer than `max(dt |Δv|, contact tolerance)` plus their
+//!   collision margins (`collision/narrow_phase/system_param.rs`, `update_contacts`). A frozen
+//!   piece's bounds hold its shape grown by the tolerance and its collider's margin
 //!   (`collider_tree/update.rs`, `update_moved_collider_aabbs`; no piece carries a body margin,
 //!   which those bounds would leave out), so a mover collider's shape bounds at its pose, grown by
 //!   `dt |v|` and its margin, meet every frozen collider it could touch. Rotation and acceleration
@@ -71,12 +71,12 @@
 //! runs of the same match.
 //!
 //! COST, OPEN. The reach casts at most one spatial query per body it evaluates, and exactly one
-//! when the body has a solid collider with nonempty masks (`Reach::of`); it evaluates each awake body that is not
-//! static, and each piece the thaw frees. The freeze and the thaw evaluate it on the compute pool
-//! (`Reach::of_each`), the thaw's cascade one wave of freed islands at a time; the freeze also
-//! gathers the sleeping pieces and classifies each candidate island's support there, every
-//! candidate's, while its budget bounds only the switches. What those dispatches cost on the hosted
-//! allocation is unmeasured.
+//! when the body has a solid collider with nonempty masks (`Reach::of`); it evaluates each awake
+//! body that is not static, and each piece the thaw frees. The freeze and the thaw evaluate it on
+//! the compute pool (`Reach::of_each`), the thaw's cascade one wave of freed islands at a time;
+//! the freeze also gathers the sleeping pieces and classifies each candidate island's support
+//! there, every candidate's, while its budget bounds only the switches. What those dispatches cost
+//! on the hosted allocation is unmeasured.
 //! With server stats armed, [`census`] gives an upper bound on freezable awake pieces outside the
 //! tick, evaluating reach in parallel. With no server stats recorder, that census fetches nothing
 //! and casts no query.
@@ -390,7 +390,7 @@ struct Reach<'w, 's> {
             Option<&'static CollisionMargin>,
         ),
     >,
-    /// Enabled non-sensor colliders, with Avian-required layers, at their placed poses.
+    /// Colliders at their placed poses (`Collider` requires `CollisionLayers`).
     solids: Query<
         'w,
         's,
@@ -494,7 +494,7 @@ impl Reach<'_, '_> {
                 continue; // A sensor or a disabled collider makes no contact.
             };
             if layers.memberships == LayerMask::NONE || layers.filters == LayerMask::NONE {
-                continue; // Query-only geometry cannot make contact.
+                continue; // An empty mask interacts with no partner.
             }
             let margin = margin.or(body_margin).map_or(0.0, |margin| margin.0);
             boxes.push((
@@ -993,17 +993,28 @@ mod tests {
             .collect()
     }
 
-    /// A hovering 0.6 × 0.4 × 0.6 m body at `at`, sliding along +x at `speed` (fixture data).
+    /// [`mover`]'s width and depth, m (fixture data).
+    const MOVER_WIDTH: f32 = 0.6;
+
+    /// A hovering box body [`MOVER_WIDTH`] wide and deep and 0.4 m tall at `at`, sliding along +x
+    /// at `speed` (fixture data).
     fn mover(app: &mut App, at: Vec3, speed: f32) -> EntityWorldMut<'_> {
         app.world_mut().spawn((
             Position(at),
             Rotation::default(),
             RigidBody::Dynamic,
             GravityScale(0.0),
-            Collider::cuboid(0.6, 0.4, 0.6),
+            Collider::cuboid(MOVER_WIDTH, 0.4, MOVER_WIDTH),
             ColliderDensity(1000.0),
             LinearVelocity(Vec3::X * speed),
         ))
+    }
+
+    /// A [`mover`] `gap` m to −x of a piece centred on the y axis on a slab topped at 0, its
+    /// bottom 0.25 m over the slab (fixture data).
+    fn mover_beside(app: &mut App, gap: f32, speed: f32) -> EntityWorldMut<'_> {
+        let x = -(SIDE / 2.0 + gap + MOVER_WIDTH / 2.0);
+        mover(app, Vec3::new(x, 0.45, 0.0), speed)
     }
 
     /// For the #379 decision, partly rested debris must not reach, while a driven hull with
@@ -1036,6 +1047,7 @@ mod tests {
                 .insert((SleepingDisabled, CollisionLayers::NONE))
                 .id()
         };
+        let sources = [10.0, 20.0, 30.0, 90.0, 0.0, 0.0, 0.0].map(&mut source);
         let [
             zero,
             partial,
@@ -1044,7 +1056,7 @@ mod tests {
             resting,
             sleeping_source,
             static_source,
-        ] = [10.0, 20.0, 30.0, 90.0, 0.0, 0.0, 0.0].map(&mut source);
+        ] = sources;
         for debris in [zero, partial] {
             app.world_mut().entity_mut(debris).insert(DebrisPiece);
         }
@@ -1052,15 +1064,7 @@ mod tests {
         app.update();
         let world = app.world_mut();
         // Admit contact after setup; the census reads masks without stepping the solver.
-        for body in [
-            zero,
-            partial,
-            driven,
-            disabled,
-            resting,
-            sleeping_source,
-            static_source,
-        ] {
+        for body in sources {
             world.entity_mut(body).insert(CollisionLayers::ALL);
         }
         let rest_window = world.resource::<TimeToSleep>().0;
@@ -1313,60 +1317,33 @@ mod tests {
         );
     }
 
-    /// The server's settled scenery must ignore movers that cannot contact it. Removing either
-    /// side of the mask check would thaw a piece despite the pair having no physical interaction.
+    /// A FROZEN PIECE IGNORES A MOVER WHOSE LAYERS FORBID THEIR CONTACT: a reach that drops either
+    /// direction of the layer test, or pools a body's layers across its colliders, thaws it.
     #[test]
     fn a_mover_without_mutual_contact_permission_does_not_thaw_a_piece() {
-        let source = CollisionLayers::new([Layer::Vehicle], LayerMask::ALL);
-        let target = CollisionLayers::new([Layer::Debris], LayerMask::ALL);
-        for (case, source, target, sensor) in [
-            (
-                "query-only sensor",
-                CollisionLayers::new([Layer::Vehicle], LayerMask::NONE),
-                target,
-                true,
-            ),
-            (
-                "empty source filter",
-                CollisionLayers::new([Layer::Vehicle], LayerMask::NONE),
-                target,
-                false,
-            ),
-            (
-                "empty source membership",
-                CollisionLayers::ALL_FILTERS,
-                target,
-                false,
-            ),
+        for (case, source) in [
             (
                 "source refuses target",
                 CollisionLayers::new([Layer::Vehicle], [Layer::Terrain]),
-                target,
-                false,
             ),
             (
                 "target refuses source",
-                source,
-                CollisionLayers::new([Layer::Debris], [Layer::Terrain]),
-                false,
+                CollisionLayers::new([Layer::TrackSide], LayerMask::ALL),
             ),
         ] {
             let mut app = settling(GRAVITY);
             slab(&mut app, 0.0);
             let rubble = piece(&mut app, Vec3::Y * (SIDE / 2.0));
-            app.world_mut().entity_mut(rubble).insert(target);
             until_frozen(&mut app, &[rubble]);
             // Fixture: the hovering box crosses the cube from a 3 cm gap at 4 m/s.
-            let mut body = mover(
-                &mut app,
-                Vec3::new(-(SIDE / 2.0 + 0.03 + 0.3), SIDE / 2.0, 0.0),
-                4.0,
-            );
-            body.insert(source);
-            if sensor {
-                body.insert(Sensor);
-            }
-            let body = body.id();
+            let body = mover_beside(&mut app, 0.03, 4.0).insert(source).id();
+            // Fixture: a permitting collider 2 m aside cannot lend its layers to the near one.
+            app.world_mut().spawn((
+                ChildOf(body),
+                Transform::from_xyz(0.0, 0.0, 2.0),
+                Collider::cuboid(SIDE, SIDE, SIDE),
+                CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+            ));
             // Fixture: enough fixed updates to cross the cube, including its far face.
             for update in 0..16 {
                 app.update();
@@ -1407,8 +1384,7 @@ mod tests {
                 let rubble = piece(&mut app, Vec3::Y * (SIDE / 2.0));
                 until_frozen(&mut app, &[rubble]);
                 let start = app.world().get::<Position>(rubble).unwrap().0;
-                let at = Vec3::new(-(SIDE / 2.0 + gap + 0.3), 0.45, 0.0);
-                let mut body = mover(&mut app, at, 0.0);
+                let mut body = mover_beside(&mut app, gap, 0.0);
                 if mover_is_a_piece {
                     body.insert((
                         DebrisPiece,

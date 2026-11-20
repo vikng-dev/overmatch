@@ -29,8 +29,16 @@ contact pair but thawed the piece. Support is read separately from constraint-pr
 this witness demonstrates false reach, not false support.
 
 The test mounts the shipped `debris::sim_plugin` through `settling`, uses anonymous cube/slab/mover
-fixtures, and covers empty source filters, empty source memberships and unilateral refusal in
-either direction. The existing positive reach test guards waking before permitted contact.
+fixtures, and covers unilateral refusal in either direction against the shipped piece layers, each
+by a mover whose second, permitting collider sits out of reach. The empty-mask cases were deleted:
+`interacts_with` refuses them with or without the early skip, so they killed no mutant. The
+existing positive reach test guards waking before permitted contact.
+
+MEASURED, once, under a temporary runtime mutant switch in `Reach::of` (since removed), with each
+case run to its own verdict: gate reverted, both cases red (`update 0: a non-contacting mover must
+leave the piece frozen`); body-pooled masks, both red; only source filter against target
+membership, "target refuses source" red; only the reverse, "source refuses target" red; unmutated,
+both green.
 
 ## Change and behaviour
 
