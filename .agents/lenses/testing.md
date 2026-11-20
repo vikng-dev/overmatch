@@ -14,10 +14,12 @@ elsewhere.
   contract broken. Assert the owned relationship or outcome; read an authored parameter from its
   owner and derive the expectation independently, never by calling the code under test for its
   answer.
-- **Substituted composition**: a test claims shipped registration, ordering, gating or integration
-  but rebuilds that wiring in its harness, so deleting the shipped guarantee leaves the test green,
-  or the harness lacks a reader the shipped app has. Mount the production plugin or installer that
-  owns the guarantee; control time and outside input around it.
+- **Substituted composition**: a test or measuring harness claims shipped registration, ordering,
+  gating or integration but rebuilds that wiring, so deleting the shipped guarantee leaves the test
+  green or the measurement unchanged, or the harness lacks a reader the shipped app has. Mount the
+  production plugin or installer that owns the guarantee, and spawn through the shipped spawn path,
+  which carries per-entity policy that registration does not; control time and outside input
+  around it, and confirm injected input where the shipped app reads it, past its gates.
 - **Historical oracle**: a test holds an emergent output, the result of several laws together, to a
   number, window or stored result whose only source is an earlier run or a guess, so an honest law
   change turns it red or gets it overwritten. Signatures: a bound beside a `MEASURED` value with no
