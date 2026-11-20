@@ -411,9 +411,14 @@ impl TankTemplate {
     /// prepared track shapes' bounds, the rest belt's ground face among them. Collision geometry
     /// alone, as for [`Self::contact_radius`]: it is what meets the ground.
     pub(crate) fn stance(&self, rotation: Quat) -> crate::terrain_grid::Stance {
-        crate::terrain_grid::Stance::enclosing(
-            self.stance_points.iter().map(|&point| rotation * point),
-        )
+        crate::terrain_grid::Stance::enclosing(self.collision_points(rotation))
+    }
+
+    /// DERIVED: the root-local points [`Self::stance`] encloses, posed by `rotation`.
+    pub(crate) fn collision_points(&self, rotation: Quat) -> impl Iterator<Item = Vec3> + '_ {
+        self.stance_points
+            .iter()
+            .map(move |&point| rotation * point)
     }
 
     /// Spawn-time wire pose, from the same initial mechanism state as `authority_state`.

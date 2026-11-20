@@ -499,6 +499,8 @@ pub fn run() -> AppExit {
         }
     }
 
+    info!("client: {}", Compatibility::build_line());
+
     // Register the shared protocol before creating the client link. The step lightyear publishes as
     // `TickDuration`, also the simulation-time unit for the view clock's pacing bound.
     let tick_duration = crate::net::server::TICK;
@@ -517,12 +519,18 @@ pub fn run() -> AppExit {
     if !headless {
         app.add_plugins(NetClientPlugin);
     }
-    if !simulate {
-        // Documentation frames to disk (the Join menu, a connect screen); exits once they are.
-        // Inert unless a capture plan takes frames.
-        app.add_plugins(crate::dev_capture::CapturePlugin(
-            crate::dev_capture::Anchor::Startup,
-        ));
+    if !headless {
+        // Frames to disk: documentation (the Join menu, a connect screen) counted from startup,
+        // or a scripted ram client's clip counted from its tank's approach. Inert unless a
+        // capture plan takes frames.
+        let anchor = if simulate && crate::dev_capture::plan().is_some() {
+            crate::dev_capture::Anchor::Approach(
+                super::ram::target().unwrap_or_else(harness::refuse_start),
+            )
+        } else {
+            crate::dev_capture::Anchor::Startup
+        };
+        app.add_plugins(crate::dev_capture::CapturePlugin(anchor));
     }
     // Passive jitter-trace recorder: frame + tick rows with link/interpolation extras. Idle unless
     // `SPIKE_TRACE` is set.

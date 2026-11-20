@@ -1,7 +1,8 @@
 //! Offline and sandbox loading frames consume no time or fixed ticks. All their capture cues,
 //! including the game's damage-model cues (game state only), share the placement origin.
 //! Online clients and dedicated servers count from startup: loading consumes time there and
-//! network arrivals are live input, never repeatable.
+//! network arrivals are live input, never repeatable. A scripted client's frames count from its
+//! tank's approach instead (`Anchor::Approach`), on the same live clock.
 //!
 //! [`install`] suspends the selected pacing; [`start_clock`] restores it before Bevy's time
 //! update when the composition is ready. [`Cues`] gates every timeline consumer during loading.
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 const LOAD_DEADLINE: Duration = Duration::from_secs(120);
 
 /// The composition event that opens a plan's timeline.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Anchor {
     /// Offline scenarios (including every demo): Playing with every tank view bound.
     Scenario,
@@ -27,6 +28,9 @@ pub enum Anchor {
     TrackRig,
     /// Online clients and dedicated servers keep their startup clock, including loading time.
     Startup,
+    /// A scripted network client keeps its startup clock; its frames count from the first frame
+    /// its controlled tank comes within the plan's `frames.lead_m` of this construction instance.
+    Approach(String),
 }
 
 /// Only compositions that suspend time have a readiness gate.
@@ -50,7 +54,7 @@ enum Clock {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Cues;
 
-pub(super) fn install(app: &mut App, anchor: Anchor) {
+pub(super) fn install(app: &mut App, anchor: &Anchor) {
     app.configure_sets(PreUpdate, Cues.run_if(running))
         .configure_sets(Update, Cues.run_if(running))
         .configure_sets(RunFixedMainLoop, Cues.run_if(running))
@@ -58,7 +62,7 @@ pub(super) fn install(app: &mut App, anchor: Anchor) {
     let gate = match anchor {
         // Startup precedes the first time update (Bevy 0.20.1 Main::run_main). The server runner
         // owns its primed real clock and tick admission; presentation must preserve both.
-        Anchor::Startup => {
+        Anchor::Startup | Anchor::Approach(_) => {
             app.insert_resource(Clock::Running);
             return;
         }
@@ -163,7 +167,7 @@ mod tests {
         let mut app = app();
         let step = app.world().resource::<Time<Fixed>>().timestep() / 2;
         app.insert_resource(TimeUpdateStrategy::ManualDuration(step));
-        install(&mut app, Anchor::Scenario);
+        install(&mut app, &Anchor::Scenario);
         #[derive(Resource, Default)]
         struct DueCues(usize);
         app.init_resource::<DueCues>().add_systems(
@@ -227,7 +231,7 @@ mod tests {
         let start = app.world().resource::<Time<Real>>().startup();
         let release = start + Duration::from_secs(10); // Fixture loading wall time.
         app.insert_resource(TimeUpdateStrategy::ManualInstant(release));
-        install(&mut app, Anchor::TankView);
+        install(&mut app, &Anchor::TankView);
         app.update();
         app.update();
         app.world_mut()
@@ -248,7 +252,7 @@ mod tests {
         for anchor in [Anchor::Scenario, Anchor::TankView] {
             let mut app = app();
             app.insert_resource(State::new(crate::state::AppState::Playing));
-            install(&mut app, anchor);
+            install(&mut app, &anchor);
             app.update();
             assert!(!matches!(app.world().resource::<Clock>(), Clock::Running));
             let tank = app.world_mut().spawn(crate::tank::Tank).id();
@@ -266,7 +270,7 @@ mod tests {
     #[test]
     fn track_anchor_waits_for_the_constructed_rig() {
         let mut app = app();
-        install(&mut app, Anchor::TrackRig);
+        install(&mut app, &Anchor::TrackRig);
         app.update();
         assert!(!matches!(app.world().resource::<Clock>(), Clock::Running));
         let mut construction = App::new();
@@ -289,7 +293,7 @@ mod tests {
     fn wall_deadline_names_the_anchor_and_missing_readiness() {
         for anchor in [Anchor::Scenario, Anchor::TankView, Anchor::TrackRig] {
             let mut app = app();
-            install(&mut app, anchor);
+            install(&mut app, &anchor);
             app.world_mut()
                 .spawn((crate::tank::Tank, crate::tank::TankViewReady));
             app.world_mut().spawn(crate::tank::Tank);
@@ -319,7 +323,9 @@ mod tests {
                     assert!(message.contains("1 of 2 tank views bound"), "{message}")
                 }
                 Anchor::TrackRig => assert!(message.contains("rig geometry absent"), "{message}"),
-                Anchor::Startup => unreachable!("fixture uses only waiting gates"),
+                Anchor::Startup | Anchor::Approach(_) => {
+                    unreachable!("fixture uses only waiting gates")
+                }
             }
             assert_eq!(
                 app.world().resource::<Time<Real>>().elapsed(),
@@ -337,7 +343,7 @@ mod tests {
     fn missing_scenario_state_panics_on_the_first_frame() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        install(&mut app, Anchor::Scenario);
+        install(&mut app, &Anchor::Scenario);
         app.update();
     }
 
@@ -351,7 +357,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<Time<Real>>()
             .update_with_duration(step);
-        install(&mut app, Anchor::Startup);
+        install(&mut app, &Anchor::Startup);
         app.update();
         assert!(matches!(app.world().resource::<Clock>(), Clock::Running));
         assert_eq!(app.world().resource::<Time<Real>>().delta(), step);

@@ -56,5 +56,12 @@ support and traction and gravity are not channels, so the channels do not sum to
 `min_forward_m_s`, `largest_forward_change_m_s`, `crossing_s` and `stall_s`, from the contact tick
 on, each defined in its `definitions`. The server's last line adds `structure`, the struck
 construction at the capture's end (`src/net/ram/structure.rs`): the share of its volume built above
-grade still in place, the opening in `plan.panel` (the component the approach ray meets, chosen
-before play), and the largest loose piece.
+grade still in place, the opening in `plan.panel` (the component the approaching tank meets
+first, chosen before play), and the largest loose piece.
+
+`--clip PLAN`, local `--ram` only, is `scripts/debris-lab`'s: the driving client renders the
+capture plan's frames on a hidden window, in the run's folder (the plan's relative paths land
+there) and with its own settings folder. Its frames open on the tank's approach to the recipe's
+construction (`dev_capture`, `Anchor::Approach`), and the run completes only once the client logs
+`capture: N of N frames saved`. Its tick times compare only with another clip run of the same plan
+on the same machine.

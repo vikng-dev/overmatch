@@ -232,6 +232,19 @@ pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
     Ok(())
 }
 
+/// The recipe's construction instance, which a scripted client's frames approach
+/// (`dev_capture`'s approach anchor; `scripts/debris-lab` sets the lever on both processes).
+pub(super) fn target() -> Result<String, LeverError> {
+    let text = env_text(LEVER)?.ok_or_else(|| {
+        LeverError::invalid(
+            LEVER,
+            "",
+            "the ram recipe whose instance a scripted client's capture frames approach",
+        )
+    })?;
+    Ok(Recipe::parse(&text)?.instance)
+}
+
 fn install_recipe(app: &mut App, recipe: Recipe) {
     app.insert_resource(Ram::new(recipe));
     app.add_systems(PostStartup, prepare);
@@ -256,11 +269,12 @@ fn runup(spec: &TankSpec, margin: f32) -> (f32, f32) {
 }
 
 impl Recipe {
-    /// The run's plan for a tank of `spec` standing as `stance` gives it at a spawn turn.
+    /// The run's plan for a tank of `spec` whose collision construction, posed at a spawn turn
+    /// about its root, has the points `points` gives.
     fn plan(
         &self,
         spec: &TankSpec,
-        stance: impl Fn(Quat) -> Stance,
+        points: impl Fn(Quat) -> Vec<Vec3>,
         manifest: &MapManifest,
         height: Option<&HeightGrid>,
     ) -> Result<Plan, LeverError> {
@@ -290,7 +304,8 @@ impl Recipe {
                 "derived run-up is outside spawn bounds; choose another approach or instance",
             ));
         }
-        let stance = stance(rotation);
+        let points = points(rotation);
+        let stance = Stance::enclosing(points.iter().copied());
         let spawn = spawn_pos(height, xz, stance);
         let pose = Transform::from_isometry(instance.pose.at_height(0.0));
         let (min, max) = kind.bounds();
@@ -298,10 +313,12 @@ impl Recipe {
             .map(|k| Vec3::select(BVec3::new(k & 1 > 0, k & 2 > 0, k & 4 > 0), max, min))
             .map(|corner| pose.transform_point(corner).dot(direction))
             .fold(f32::NEG_INFINITY, f32::max);
-        // The approach in the construction's frame, at the hull root's height over its ground.
+        // Each point of the tank approaching, in the construction's frame, its root standing at
+        // its stance over its own ground.
         let turn = pose.rotation.inverse();
-        let origin = turn * (direction * -runup_m) + Vec3::Y * (GRADE_M + stance.depth_m);
-        let panel = structure::Panel::met(kind, origin, turn * direction).map_err(|why| {
+        let lift = Vec3::Y * (GRADE_M + stance.depth_m);
+        let origins = (points.iter()).map(|&point| turn * (point - direction * runup_m) + lift);
+        let panel = structure::Panel::met(kind, origins, turn * direction).map_err(|why| {
             let value = format!(
                 "instance {} heading_deg {}",
                 self.instance, self.heading_deg
@@ -331,7 +348,7 @@ pub(super) fn prepare(
         ram.recipe
             .plan(
                 template.spec(),
-                |turn| template.stance(turn),
+                |turn| template.collision_points(turn).collect(),
                 &manifest,
                 height.as_deref(),
             )
@@ -814,7 +831,7 @@ pub(crate) fn fixture_plan(app: &mut App) -> FixturePlan {
                 recipe
                     .plan(
                         template.spec(),
-                        |turn| template.stance(turn),
+                        |turn| template.collision_points(turn).collect(),
                         &manifest,
                         height.as_deref(),
                     )
@@ -879,7 +896,15 @@ mod tests {
         );
     }
 
-    use crate::terrain_grid::tests::FIXTURE_STANCE;
+    /// Fixture: a tank-sized box's corners about a root 0.6 m over its lowest point.
+    fn fixture_points(_: Quat) -> Vec<Vec3> {
+        (0..8)
+            .map(|k| {
+                let pick = |bit, low, high| if k & bit > 0 { high } else { low };
+                Vec3::new(pick(1, -1.7, 1.7), pick(2, -0.6, 2.0), pick(4, -3.5, 3.5))
+            })
+            .collect()
+    }
 
     fn fixture_spec() -> TankSpec {
         ron::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron")).unwrap()
@@ -895,7 +920,7 @@ mod tests {
             // Fixture: absent and graybox targets.
             recipe.instance = instance.into();
             let error = recipe
-                .plan(&spec, |_| FIXTURE_STANCE, &manifest, None)
+                .plan(&spec, fixture_points, &manifest, None)
                 .err()
                 .expect("unusable target refused")
                 .to_string();
@@ -905,14 +930,10 @@ mod tests {
             );
         }
         recipe.instance = "brick_0001".into(); // Fixture construction from the manifest owner.
-        assert!(
-            recipe
-                .plan(&spec, |_| FIXTURE_STANCE, &manifest, None)
-                .is_ok()
-        );
+        assert!(recipe.plan(&spec, fixture_points, &manifest, None).is_ok());
         recipe.runup_margin = f64::MAX; // Fixture: finite input whose derived run-up cannot fit.
         let error = recipe
-            .plan(&spec, |_| FIXTURE_STANCE, &manifest, None)
+            .plan(&spec, fixture_points, &manifest, None)
             .err()
             .expect("unreachable route refused")
             .to_string();

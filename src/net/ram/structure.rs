@@ -8,9 +8,11 @@
 //! resting on its walls count, a heap does not. The share counts volume built above grade
 //! ([`GRADE_M`], the centroid's height); chunks built below it are counted apart.
 //!
-//! PANEL. The construction component the recipe's approach ray meets first, chosen before play
-//! from the heading and the construction's geometry. Its face is the plane the ray enters through,
-//! clipped at grade; the opening is that face's area over the panel's chunks not in place.
+//! PANEL. The construction component the approaching tank meets first: the element that a ray
+//! along the recipe's heading from any point of the tank's collision construction enters first.
+//! Chosen before play from the heading and the two geometries, never by the construction's shape.
+//! Its face is the plane that ray enters through, clipped at grade; the opening is that face's
+//! area over the panel's chunks not in place.
 
 use bevy::prelude::*;
 use serde::Serialize;
@@ -36,13 +38,13 @@ pub(super) struct Panel {
 }
 
 impl Panel {
-    /// The component whose element the ray from `origin` along unit `heading` (construction frame)
-    /// enters first, the lowest element on a tie. Refused, naming the recipe field, for a
-    /// construction with no breakable matter above grade and for a ray that meets no element or a
-    /// face with no area above grade.
+    /// The component whose element a ray from one of `origins` along unit `heading` (construction
+    /// frame) enters first, the first origin's lowest element on a tie. Refused, naming the recipe
+    /// field, for a construction with no breakable matter above grade and for rays that meet no
+    /// element or a face with no area above grade.
     pub(super) fn met(
         kind: &ConstructionKind,
-        origin: Vec3,
+        origins: impl IntoIterator<Item = Vec3>,
         heading: Vec3,
     ) -> Result<Self, &'static str> {
         if !(kind.layout.chunks.iter())
@@ -50,14 +52,19 @@ impl Panel {
         {
             return Err("an instance with breakable matter above grade");
         }
-        let missed = "a heading_deg whose approach, at the hull root's height over grade, meets a panel of the instance with face area above grade";
+        let missed =
+            "a heading_deg whose approach meets a panel of the instance with face area above grade";
         let blocks = &kind.layout.element_blocks;
-        let (element, distance, normal) = (blocks.iter().enumerate())
-            .filter_map(|(k, block)| block.entry_face(origin, heading).map(|(d, n)| (k, d, n)))
+        let (element, _, at, normal) = (origins.into_iter())
+            .flat_map(|origin| {
+                (blocks.iter().enumerate()).filter_map(move |(k, block)| {
+                    let (d, n) = block.entry_face(origin, heading)?;
+                    Some((k, d, origin + heading * d, n))
+                })
+            })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .ok_or(missed)?;
         let component = kind.asset.elements[element].component;
-        let at = origin + heading * distance;
         let face_m2 = (kind.asset.elements.iter().zip(blocks))
             .filter(|(element, _)| element.component == component)
             .map(|(_, block)| face_area(block, at, normal))
@@ -98,6 +105,10 @@ fn face_area(block: &Block, at: Vec3, normal: Vec3) -> f32 {
 /// The construction at a capture's end.
 #[derive(Serialize, Debug, PartialEq)]
 pub(super) struct Reading {
+    /// The construction's ordinal and its chunks not in place, ascending: the key two runs
+    /// compare by (`scripts/debris-lab`), never an entity.
+    construction: u16,
+    displaced: Vec<u16>,
     /// Volume built above grade, m³, and the part of it in place.
     above_grade_m3: f32,
     in_place_m3: f32,
@@ -149,6 +160,7 @@ pub(super) fn read<'a>(
     let kind = &root.kind;
     let (at, normal) = (Vec3::from(panel.at), Vec3::from(panel.normal));
     let (mut above, mut in_place_m3, mut below, mut opening) = (0.0, 0.0, 0, 0.0);
+    let mut displaced = Vec::new();
     for (c, chunk) in chunks.iter().enumerate() {
         let block = &kind.layout.blocks[c];
         let radius = (block.points.iter())
@@ -164,12 +176,17 @@ pub(super) fn read<'a>(
             above += chunk.volume;
             in_place_m3 += if in_place { chunk.volume } else { 0.0 };
         }
+        if !in_place {
+            displaced.push(u16::try_from(c).expect("the layout refuses law chunks past 16 bits"));
+        }
         let element = usize::from(kind.layout.element_of[c]);
         if !in_place && kind.asset.elements[element].component == panel.component {
             opening += face_area(block, at, normal);
         }
     }
     Reading {
+        construction: root.construction,
+        displaced,
         above_grade_m3: above,
         in_place_m3,
         in_place_share: in_place_m3 / above,
@@ -188,7 +205,7 @@ pub(super) mod tests {
     /// 1 m over grade meeting its west face.
     pub(in crate::net::ram) fn column_panel() -> Panel {
         let kind = column_construction_from(-1.0);
-        Panel::met(&kind, Vec3::new(-5.0, 1.0, 0.0), Vec3::X).expect("the column faces the ray")
+        Panel::met(&kind, [Vec3::new(-5.0, 1.0, 0.0)], Vec3::X).expect("the column faces the ray")
     }
 
     /// HOW MUCH STANDS: the share counts volume built above grade by each chunk's own radius, and
@@ -211,12 +228,16 @@ pub(super) mod tests {
             retired: None,
         };
         // Fixture: the top cube lifted less, then more, than a unit cube's radius (0.87 m).
-        for (lift, in_place_m3, opening_m2) in [(0.4, 2.0, 0.0), (1.0, 1.0, 1.0)] {
+        for (lift, displaced, in_place_m3, opening_m2) in
+            [(0.4, vec![], 2.0, 0.0), (1.0, vec![2], 1.0, 1.0)]
+        {
             let frame = Transform::from_xyz(0.0, lift, 0.0);
             let pieces = [(&piece, &loose, frame, 3.0)].into_iter();
             assert_eq!(
                 read(&panel, (&root, Transform::IDENTITY), pieces),
                 Reading {
+                    construction: 3,
+                    displaced,
                     above_grade_m3: 2.0,
                     in_place_m3,
                     in_place_share: in_place_m3 / 2.0,

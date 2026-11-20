@@ -174,7 +174,9 @@ pub(crate) struct Frames {
     /// Seconds since the composition anchor ([`super::Anchor`]), finite and non-negative;
     /// sorted with times sharing a file name kept once. Offline/sandbox loading consumes no
     /// time; online clients and dedicated servers count from startup, including loading.
-    /// Network arrivals are not repeatable. Default `[6.0]`.
+    /// Network arrivals are not repeatable. Under a timeline-opening event (a shot's burst, a
+    /// scripted client's approach) the first time falls a fixed warm-up after the event and the
+    /// rest keep their spacing. Default `[6.0]`.
     #[serde(default = "default_at")]
     pub(crate) at: Vec<f32>,
     /// The frame in physical pixels, `(width, height)`. Default `(2560, 1440)`.
@@ -201,6 +203,11 @@ pub(crate) struct Frames {
     /// Who places the player's camera ([`Camera`]). Default the player's own writers.
     #[serde(default)]
     pub(crate) camera: Camera,
+    /// Under a scripted client's approach anchor ([`super::Anchor::Approach`]), and only there:
+    /// the distance from the construction's bounds at which the controlled tank's root opens the
+    /// frames' timeline, finite and positive, metres.
+    #[serde(default)]
+    pub(crate) lead_m: Option<f32>,
 }
 
 /// Who places the player's camera. One enum, so a pose and a follow cannot both be asked for.
@@ -572,6 +579,12 @@ pub(crate) enum PlanError {
     Field(String),
     OrbitCamera(bevy::ecs::query::QuerySingleError),
     FollowWithoutTank(super::Anchor),
+    /// A field the root's anchor contradicts.
+    Anchor {
+        field: &'static str,
+        anchor: super::Anchor,
+        why: &'static str,
+    },
     ImpactOffTerrain {
         x: f32,
         z: f32,
@@ -603,8 +616,9 @@ impl std::fmt::Display for PlanError {
             ),
             Self::FollowWithoutTank(anchor) => write!(
                 f,
-                "frames.camera: Follow follows the scenario's controlled tank; only a Scenario root guarantees it at the anchor ({anchor:?} does not); choose a fixed camera (Pose) or a Scenario root"
+                "frames.camera: Follow follows the controlled tank; only a Scenario root or a scripted client's approach guarantees it at the anchor ({anchor:?} does not); choose a fixed camera (Pose) or a Scenario root"
             ),
+            Self::Anchor { field, anchor, why } => write!(f, "{field}: {why} ({anchor:?})"),
             Self::ImpactOffTerrain { x, z, half_extent } => write!(
                 f,
                 "impacts.x/z: ({x}, {z}) lies outside the terrain's ±{half_extent} m span; place x and z inside that span"
@@ -693,6 +707,11 @@ impl CapturePlan {
             }
             if frames.at.is_empty() {
                 return Err("frames.at: no frame time".into());
+            }
+            if let Some(lead) = frames.lead_m
+                && !(lead.is_finite() && lead > 0.0)
+            {
+                return Err(format!("frames.lead_m: {lead} is not finite and positive"));
             }
             for &at in &frames.at {
                 finite_at("frames.at", at)?;

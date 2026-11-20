@@ -17,10 +17,6 @@ use bevy::prelude::*;
 /// Resolution: bound the wait for a missing burst after its cue, in anchored seconds.
 const GIVE_UP_S: f32 = 30.0;
 
-/// The app second the shot burst at, once it has: the capture's frames count from it.
-#[derive(Resource)]
-pub(super) struct ShotReady(pub(super) Option<f32>);
-
 #[derive(Resource)]
 struct Cue {
     key: String,
@@ -47,7 +43,7 @@ pub(super) fn install_shot(
     refuse: fn(super::plan::PlanError) -> !,
 ) {
     info!("capture: game's damage model shot {shot:?}");
-    app.insert_resource(ShotReady(None))
+    app.insert_resource(super::FrameEpoch(None))
         .insert_resource(RetainSpentShells(true))
         .insert_resource(crate::camera::CameraCaptive(true))
         .add_systems(
@@ -221,7 +217,7 @@ fn select_on_hud(
 
 fn show_shot(
     time: Res<Time>,
-    mut ready: ResMut<ShotReady>,
+    mut epoch: ResMut<super::FrameEpoch>,
     mut cue: ResMut<Cue>,
     shots: Query<(&PenetrationMarks, &SpallMarks, &ShellPath)>,
     mut cameras: Query<
@@ -246,7 +242,8 @@ fn show_shot(
                 fields.burst.is_some()
             );
             cue.logged = true;
-            ready.0 = Some(time.elapsed_secs());
+            // Burst views and their pipelines prepare before the cameras are retargeted.
+            epoch.0 = Some(time.elapsed_secs() + super::BURST_VIEW_WARM_UP);
             cue.camera = Some(viewpoint(at));
         }
         for points in path.points.windows(2) {

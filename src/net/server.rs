@@ -81,6 +81,10 @@ pub fn run() {
         ..default()
     }));
     super::server_host::log_startup();
+    info!(
+        "server: {}",
+        super::compatibility::Compatibility::build_line()
+    );
     // No GPU supplies compression support. Declare the loaders' existing NONE fallback explicitly;
     // the server allowlist carries only PNG textures and `load_tank_sim_assets` opens no scene.
     app.insert_resource(bevy::image::CompressedImageFormatSupport(
