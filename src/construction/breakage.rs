@@ -41,8 +41,9 @@
 //!   topology changed or whose pulse ended, and changed spin, continue next tick without requiring
 //!   another deposit.
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
-//!   about its chord, open across each face it crosses ([`open_ends`]), and a blast a dish in each
-//!   chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
+//!   about its chord, open across each face it crosses ([`open_ends`]), and a blast's scab a dish
+//!   in the chunk it leaves ([`holes_of`]; a blast takes the chunks its face loads crush whole,
+//!   [`blast_loads`]); a chunk still standing after the deposit
 //!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
 //!   or mass reads a hole: they see the whole chunk, and [`Shape`] holds none. A hole holds no more
 //!   than the volume its load crushed, the volume it took from the chunk's pool, so one the size
@@ -2046,7 +2047,12 @@ fn apply_deposits(mut p: DepositParam) {
 }
 
 /// A blast's ray hits on one construction as its loads ([`Load::blast`]), each face's Law 2 read on
-/// its chunk's hull at authored size.
+/// its chunk's hull at authored size. A face load that crushes any volume wears its chunk's whole
+/// pool, so the chunk goes whole. StandIn for the law of the fractured zone around the volume an
+/// impulsive pressure crushes, which no law here states; a chunk is the finest unit the
+/// construction knows, and [`fracture::Material::crushed_by`] crushes nothing below the material's
+/// dynamic strength, so the zone is the chunks whose loaded faces the pressure crushed. A scab's
+/// removal keeps its own volume.
 fn blast_loads(
     kind: &ConstructionKind,
     hits: &[(usize, fracture::RayHit)],
@@ -2056,11 +2062,16 @@ fn blast_loads(
         return Vec::new(); // This deposit has no blast surface stops.
     }
     let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
-    let (loads, _) = Load::blast(hits, |c| fracture::Backing {
+    let (mut loads, _) = Load::blast(hits, |c| fracture::Backing {
         block: &kind.layout.blocks[c],
         material: kind.layout.materials[c],
         contacts: &contacts,
     });
+    for load in &mut loads {
+        if load.peak.is_some() && load.crushed > 0.0 {
+            load.crushed = load.crushed.max(live.state.pool[load.chunk]);
+        }
+    }
     loads
 }
 

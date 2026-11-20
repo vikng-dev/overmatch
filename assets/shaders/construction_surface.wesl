@@ -17,6 +17,13 @@ import constants::MATERIAL_BIND_GROUP;
 // DERIVATIVES ARE TAKEN ONCE, UP FRONT. The secondary branch is not uniform across a quad at the eaves,
 // so its fetches are `textureSampleGrad` with the UV's gradients computed outside the branch.
 //
+// A BREAK FACE IS CORE (`construction::view::relief`): lane `2 + lane` in UV1.x, its UV the
+// asset-frame position along the element's run and up, in metres, its vertex colour its substance's
+// exposed linear colour with the position across the element's depth in alpha. It draws that colour
+// with the lane visual's mortar where a bed, head or leaf joint plane crosses it (heads and leaves
+// staggered half a unit per course), under its drawn normal, unoccluded, at the lane pack's roughness
+// and metallic.
+//
 // HOLES ONLY WHERE THE MATERIAL MAY DISCARD. A construction with a hole wears its own copy of the
 // material, alpha-masked (`construction::view`), and only that variant compiles the hole path
 // (`construction_holes.wesl`): a construction without one draws exactly as it would with no hole code.
@@ -39,6 +46,9 @@ import super::terrain_shadow::visibility;
 struct SurfaceParams {
     // x: the secondary pack's repeats per metre. yzw: unused.
     secondary: vec4<f32>,
+    // Per lane, primary first: (mortar linear rgb, joint width m), (courses per m, a bed joint's
+    // height m, heads per m, leaves per m).
+    breaks: array<vec4<f32>, 4>,
 }
 
 @group(MATERIAL_BIND_GROUP) @binding(100) var<uniform> surface: SurfaceParams;
@@ -47,7 +57,8 @@ struct SurfaceParams {
 @group(MATERIAL_BIND_GROUP) @binding(103) var secondary_normal_texture: texture_2d<f32>;
 @group(MATERIAL_BIND_GROUP) @binding(104) var secondary_arm_texture: texture_2d<f32>;
 
-// Every construction mesh supplies UV1: x is the declared palette lane, y its hole tag.
+// Every construction mesh supplies UV1: x is the declared palette lane, 2 more on a break face, y its
+// hole tag.
 
 @vertex
 fn vertex(vertex_in: Vertex) -> VertexOutput {
@@ -86,12 +97,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let secondary_uv = in.uv * surface.secondary.x;
     let ddx = dpdx(secondary_uv);
     let ddy = dpdy(secondary_uv);
+    // Metres of UV one pixel spans.
+    let footprint = max(fwidth(in.uv.x), fwidth(in.uv.y));
 
     // The primary pack, through the whole standard path: albedo, normal map against the mesh
     // tangents, ARM, and every non-texture material parameter.
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
-    let secondary = in.uv_b.x > 0.5;
+    let core = in.uv_b.x > 1.5;
+    let secondary = in.uv_b.x - select(0.0, 2.0, core) > 0.5;
     if secondary {
         let double_sided = (pbr_input.material.flags
             & pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
@@ -114,6 +128,29 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.material.perceptual_roughness = pbr_bindings::material.perceptual_roughness * arm.g;
         pbr_input.material.metallic = pbr_bindings::material.metallic * arm.b;
     }
+
+@if(VERTEX_COLORS) {
+    // Only a construction view's mesh draws a break face, and it always carries colours.
+    if core {
+        let lane = select(0u, 2u, secondary);
+        let mortar = surface.breaks[lane];
+        let units = surface.breaks[lane + 1u];
+        let course = (in.uv.y - units.y) * units.x;
+        let head = in.uv.x * units.z + 0.5 * floor(course);
+        let leaf = in.color.a * units.w + 0.5 * floor(course);
+        // The distance to the nearest joint's centre plane, m.
+        let off_joint = min(
+            min(abs(fract(course + 0.5) - 0.5) / units.x, abs(fract(head + 0.5) - 0.5) / units.z),
+            abs(fract(leaf + 0.5) - 0.5) / units.w);
+        let joint = 1.0 - smoothstep(
+            0.5 * mortar.w - footprint, 0.5 * mortar.w + footprint, off_joint);
+        pbr_input.material.base_color = vec4(
+            pbr_bindings::material.base_color.rgb * mix(in.color.rgb, mortar.rgb, joint),
+            pbr_bindings::material.base_color.a);
+        pbr_input.N = pbr_input.world_normal;
+        pbr_input.diffuse_occlusion = vec3(1.0);
+    }
+}
 
 @if(MAY_DISCARD) {
 @if(VERTEX_UVS_B) {

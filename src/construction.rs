@@ -225,7 +225,8 @@ impl ConstructionLibrary {
             let dressing = std::fs::read_to_string(&dressed).unwrap_or_else(|err| {
                 panic!("construction: {} cannot be read: {err}", dressed.display())
             });
-            kind.dressing = view::Dressing::resolve(&dressing, &kind.asset, &kind.layout)
+            kind.dressing = (kind.dressing)
+                .resolve(&dressing, &kind.asset, &kind.layout)
                 .unwrap_or_else(|err| panic!("construction: {}: {err}", dressed.display()));
             library.texts.extend([text, dressing]);
             library.kinds.insert(id.to_owned(), Arc::new(kind));

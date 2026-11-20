@@ -1769,6 +1769,23 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
     assert!(wears, "and the rays pass it to the chunk");
 }
 
+/// A BLAST THAT CRUSHES A CHUNK'S FACE TAKES THE CHUNK WHOLE: the fixture burst 5 cm off a fixture
+/// cube, where its peak beats the brick's dynamic strength and its energy crushes less than the
+/// cube's pool, leaves the cube dust ([`blast_loads`]). A blast that took only the volume it
+/// crushed, leaving a shell round a dish, fails here; a breach drawn as cells removed whole rests
+/// on it.
+#[test]
+fn a_blast_that_crushes_a_chunk_s_face_takes_the_chunk_whole() {
+    let kind = shielding_cube();
+    let (start, w, _) = through(&kind, 0, 0, 0.0);
+    let (mut app, root) = composed_kind(false, &kind);
+    app.update();
+    app.update();
+    charge(&mut app, start + *w * 0.45);
+    let live = &app.world().get::<Breakage>(root).unwrap().live;
+    assert_eq!(live.state.fate[0], Fate::Dust);
+}
+
 /// A LOOSE PIECE SHADOWED BY A STANDING CHUNK TAKES NOTHING: a fixture burst half a metre before a
 /// house wall pushes a loose cube on its own side and leaves the same cube behind the wall, where
 /// every ray toward it meets a standing chunk first, at rest. Pieces tested ahead of the chunks, or

@@ -127,6 +127,9 @@ pub(crate) fn lane_for_substance(name: &str) -> SurfaceLane {
 pub(crate) struct SurfaceParams {
     /// `x`: the secondary pack's repeats per metre. `yzw`: unused.
     pub secondary: Vec4,
+    /// The primary lane's visual's break records, then the secondary's
+    /// ([`crate::construction::view::break_params`]).
+    pub breaks: [Vec4; 4],
 }
 
 /// The secondary half of [`ConstructionMaterial`]: the secondary palette lane pack's three maps and their scale. Bindings
@@ -253,6 +256,11 @@ pub(crate) fn material(
         extension: Surface {
             params: SurfaceParams {
                 secondary: Vec4::new(secondary.uv_per_m(), 0.0, 0.0, 0.0),
+                breaks: [primary, secondary]
+                    .map(|pack| crate::construction::view::break_params(&pack.visual))
+                    .concat()
+                    .try_into()
+                    .expect("two lanes of two records"),
             },
             secondary_albedo,
             secondary_normal,

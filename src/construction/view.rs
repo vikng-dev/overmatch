@@ -21,7 +21,9 @@
 //! shows when the round that made it is drawn arriving. A construction with a swapped element draws its
 //! own mesh ([`broken_mesh`]): whole elements as before, a swapped element's standing chunks as
 //! their hulls, framed exactly as the element's faces, so a swapped wall looks unchanged until a
-//! chunk goes; one with nothing left standing draws no mesh at all, never an empty one. Cracks are
+//! chunk goes; one with nothing left standing draws no mesh at all, never an empty one. A relieved
+//! material draws the faces a departed neighbour opened, and their rims, rough ([`relief`]). A
+//! redraw rebuilds only the elements whose drawn chunks moved ([`Sections`]). Cracks are
 //! dark strips where an opened seam meets its element's surface ([`crack_mesh`]). A fallen group
 //! draws its chunks' hulls on its body or carrier ([`piece_mesh`]), holes and all. A fallen chunk
 //! stays on its construction, where it stood, until a shown group draws it ([`ShownOnPieces`]): a
@@ -53,6 +55,7 @@
 //! ([`crate::vfx::construction_dressing`]); an undressed face's is white.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -69,6 +72,9 @@ use crate::construction_surface::{ConstructionMaterial, holed};
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
 use crate::track::oracle::HullField;
+
+mod relief;
+pub(crate) use relief::break_params;
 
 /// `<id>.dressing.ron` as authored or generated (module doc).
 #[derive(Debug, serde::Deserialize)]
@@ -101,6 +107,9 @@ pub(crate) struct Dressing {
     /// Per element: the planes of its hull that are original exterior of a skinned part.
     skin: Vec<Vec<(Vec3, f32)>>,
     cards: Vec<Card>,
+    /// Per law chunk, per face: `None` on its element's hull, else the chunks of its element
+    /// across it ([`relief::across`]).
+    across: Arc<Vec<Vec<Option<Vec<u16>>>>>,
 }
 
 /// Resolution: a card's corners lie within this distance (m) of their mean plane; the generator
@@ -119,14 +128,17 @@ impl Dressing {
         Self {
             skin: vec![Vec::new(); layout.element_blocks.len()],
             cards: Vec::new(),
+            across: Arc::new(relief::across(layout)),
         }
     }
 
-    /// The dressing `text` declares for the construction `asset` laid out as `layout`. Refuses a
-    /// skin naming no part of the asset, a card of fewer than three corners, off its plane or not
-    /// finite, and a card whose base lies in no law chunk: the owner is the chunk holding the base
-    /// deepest, the lowest on a tie, so a base on a shared face has one owner.
+    /// This bare dressing with the skin and cards `text` declares for the construction `asset`
+    /// laid out as `layout`. Refuses a skin naming no part of the asset, a card of fewer than three
+    /// corners, off its plane or not finite, and a card whose base lies in no law chunk: the owner
+    /// is the chunk holding the base deepest, the lowest on a tie, so a base on a shared face has
+    /// one owner.
     pub(crate) fn resolve(
+        &self,
         text: &str,
         asset: &ConstructionAsset,
         layout: &Layout,
@@ -188,7 +200,11 @@ impl Dressing {
                 Ok(Card { owner, corners })
             })
             .collect::<Result<_, String>>()?;
-        Ok(Self { skin, cards })
+        Ok(Self {
+            skin,
+            cards,
+            across: self.across.clone(),
+        })
     }
 
     /// Whether a face of element `e`, outward `n` through `corners`, is original exterior skin.
@@ -281,23 +297,38 @@ struct ElementLook {
     frame: SurfaceFrame,
     run: Vec3,
     secondary: bool,
+    /// Its visual's break relief, `None` for a visual drawn as its bare hull.
+    relief: Option<&'static relief::Relief>,
+    /// Its substance's exposed linear colour: what a break face shows.
+    core: [f32; 3],
 }
 
 impl ElementLook {
     fn of(asset: &ConstructionAsset, e: usize) -> Self {
         let element = &asset.elements[e];
+        let material = &asset.materials[usize::from(element.material)];
+        let registry = crate::substances::SubstanceRegistry::shipped_static();
+        let feedback = registry
+            .hard(material)
+            .expect("an admitted construction's material is a hard substance")
+            .feedback;
         Self {
             frame: element.surface_frame,
             run: run(&element.points()),
-            secondary: crate::construction_surface::lane_for_substance(
-                &asset.materials[usize::from(element.material)],
-            ) == crate::construction_surface::SurfaceLane::Secondary,
+            secondary: crate::construction_surface::lane_for_substance(material)
+                == crate::construction_surface::SurfaceLane::Secondary,
+            relief: relief::of(
+                registry
+                    .visual(material)
+                    .expect("an admitted construction's material names a visual"),
+            ),
+            core: feedback.exposed_linear(),
         }
     }
 }
 
 /// A mesh's faces as they are added, each framed in metres (module doc).
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 struct Faces {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
@@ -352,31 +383,55 @@ impl Faces {
         }
     }
 
-    /// Element `e`'s hull faces, its original exterior skinned, and its owned cards.
-    fn element(&mut self, kind: &ConstructionKind, e: usize) {
-        let look = ElementLook::of(&kind.asset, e);
+    /// Element `e`'s hull faces in its `look`, its original exterior skinned, and its owned cards.
+    fn element(&mut self, kind: &ConstructionKind, e: usize, look: &ElementLook) {
         for (n, corners) in hull_faces(&kind.asset.elements[e].points()) {
             let tint = skin_tint(kind, e, n, &corners);
-            self.face(n, &corners, &look, Vec3::ZERO, (0.0, tint));
+            self.face(n, &corners, look, Vec3::ZERO, (0.0, tint));
         }
         self.cards(
             kind,
-            &look,
+            look,
             |c| usize::from(kind.layout.element_of[c]) == e,
             Vec3::ZERO,
         );
     }
 
-    /// Law chunk `c`'s hull with its element's look, drawn `offset` back, its faces tagged `tag`
-    /// (module doc), its original exterior skinned, and the cards it owns.
-    fn chunk(&mut self, kind: &ConstructionKind, c: usize, offset: Vec3, tag: f32) {
-        let e = usize::from(kind.layout.element_of[c]);
-        let look = ElementLook::of(&kind.asset, e);
-        for (n, corners) in kind.layout.blocks[c].faces() {
-            let tint = skin_tint(kind, e, n, &corners);
-            self.face(n, &corners, &look, offset, (tag, tint));
+    /// Law chunk `c`'s hull in its element's `look`, drawn `offset` back, its faces tagged `tag`
+    /// (module doc), its original exterior skinned, its breaks relieved beside the chunks
+    /// `together` names ([`relief`]), and the cards it owns.
+    fn chunk(
+        &mut self,
+        kind: &ConstructionKind,
+        c: usize,
+        look: &ElementLook,
+        (offset, tag): (Vec3, f32),
+        together: &dyn Fn(usize) -> bool,
+    ) {
+        match look.relief {
+            Some(relief) => relief.chunk(self, kind, c, look, (offset, tag), together),
+            None => {
+                let e = usize::from(kind.layout.element_of[c]);
+                for (n, corners) in kind.layout.blocks[c].faces() {
+                    let tint = skin_tint(kind, e, n, &corners);
+                    self.face(n, &corners, look, offset, (tag, tint));
+                }
+            }
         }
-        self.cards(kind, &look, |owner| owner == c, offset);
+        self.cards(kind, look, |owner| owner == c, offset);
+    }
+
+    /// `other`'s faces after these.
+    fn append(&mut self, other: &Faces) {
+        let first = u32::try_from(self.positions.len()).expect("a construction's mesh fits u32");
+        self.positions.extend_from_slice(&other.positions);
+        self.normals.extend_from_slice(&other.normals);
+        self.tangents.extend_from_slice(&other.tangents);
+        self.uvs.extend_from_slice(&other.uvs);
+        self.packs.extend_from_slice(&other.packs);
+        self.colors.extend_from_slice(&other.colors);
+        self.indices
+            .extend(other.indices.iter().map(|&v| first + v));
     }
 
     /// The cards whose owner `owns` accepts, each drawn on both sides under the card tint, tagged
@@ -422,26 +477,44 @@ fn skin_tint(kind: &ConstructionKind, e: usize, n: Vec3, corners: &[Vec3]) -> [f
 pub(crate) fn mesh(kind: &ConstructionKind) -> Mesh {
     let mut faces = Faces::default();
     for e in 0..kind.layout.element_blocks.len() {
-        faces.element(kind, e);
+        faces.element(kind, e, &ElementLook::of(&kind.asset, e));
     }
     faces.mesh()
 }
 
-/// A broken construction's mesh in its own frame at authored size: every whole element's hull, and every
-/// standing chunk of each swapped element its hull, so a chunk turned to dust or fallen is a hole;
-/// each card drawn with the matter that owns it.
-pub(crate) fn broken_mesh(kind: &ConstructionKind, shape: &Shape) -> Mesh {
+/// Per element, the faces a construction last drew of it and what it drew them from: `None` for
+/// the whole element, else whether each of its chunks stood. Its faces read nothing else of the
+/// shape, so a redraw rebuilds only the elements whose entry moved ([`broken_mesh`]).
+#[derive(Default)]
+pub(crate) struct Sections(Vec<Option<(Option<Vec<bool>>, Faces)>>);
+
+/// A broken construction's mesh in its own frame at authored size: every whole element's hull, and
+/// every standing chunk of each swapped element its hull, so a chunk turned to dust or fallen is a
+/// hole; each card drawn with the matter that owns it. `sections` holds what the last draw of this
+/// construction drew; only an element whose drawn chunks moved is rebuilt.
+pub(crate) fn broken_mesh(kind: &ConstructionKind, shape: &Shape, sections: &mut Sections) -> Mesh {
+    sections
+        .0
+        .resize_with(kind.layout.element_blocks.len(), || None);
+    let standing = |c: usize| shape.fate[c] == Fate::Standing;
     let mut faces = Faces::default();
-    for (e, swapped) in shape.swapped.iter().enumerate() {
-        if *swapped {
-            for c in kind.layout.chunks_of(e) {
-                if shape.fate[c] == Fate::Standing {
-                    faces.chunk(kind, c, Vec3::ZERO, (c + 1) as f32);
+    for (e, section) in sections.0.iter_mut().enumerate() {
+        let drawn = shape.swapped[e].then(|| kind.layout.chunks_of(e).map(standing).collect());
+        if section.as_ref().is_none_or(|(was, _)| *was != drawn) {
+            let look = ElementLook::of(&kind.asset, e);
+            let mut own = Faces::default();
+            match &drawn {
+                None => own.element(kind, e, &look),
+                Some(_) => {
+                    for c in kind.layout.chunks_of(e).filter(|&c| standing(c)) {
+                        own.chunk(kind, c, &look, (Vec3::ZERO, (c + 1) as f32), &standing);
+                    }
                 }
             }
-        } else {
-            faces.element(kind, e);
+            *section = Some((drawn, own));
         }
+        let (_, own) = section.as_ref().expect("every element was drawn above");
+        faces.append(own);
     }
     faces.mesh()
 }
@@ -450,8 +523,11 @@ pub(crate) fn broken_mesh(kind: &ConstructionKind, shape: &Shape) -> Mesh {
 /// framed where they stood, the `k`-th chunk's faces tagged `k + 1` (module doc).
 pub(crate) fn piece_mesh(kind: &ConstructionKind, chunks: &[u16], origin: Vec3) -> Mesh {
     let mut faces = Faces::default();
+    let together = |c: usize| chunks.iter().any(|&o| usize::from(o) == c);
     for (k, &c) in chunks.iter().enumerate() {
-        faces.chunk(kind, usize::from(c), origin, (k + 1) as f32);
+        let c = usize::from(c);
+        let look = ElementLook::of(&kind.asset, usize::from(kind.layout.element_of[c]));
+        faces.chunk(kind, c, &look, (origin, (k + 1) as f32), &together);
     }
     faces.mesh()
 }
@@ -625,11 +701,12 @@ fn drawn_shape(shown: &Shape, on_pieces: &ShownOnPieces) -> Shape {
 #[derive(Component, Clone, Debug, Default, PartialEq)]
 pub(crate) struct ShownHoles(pub(crate) Vec<Vec<Hole>>);
 
-/// A broken construction view's cracks' child. The view's own mesh lives in its `Mesh3d` alone: a
-/// replaced or removed handle frees the old asset.
+/// A broken construction view's cracks' child and the sections its mesh was drawn from. The view's
+/// own mesh lives in its `Mesh3d` alone: a replaced or removed handle frees the old asset.
 #[derive(Component)]
 struct OwnMesh {
     cracks: Option<Entity>,
+    sections: Sections,
 }
 
 /// Present the record up to the presentation clock ([`PresentationClock`]: the interpolation cursor on a
@@ -782,7 +859,7 @@ fn redraw(
             Entity,
             Option<&mut Mesh3d>,
             Option<&mut MeshMaterial3d<ConstructionMaterial>>,
-            Option<&OwnMesh>,
+            Option<&mut OwnMesh>,
         ),
         With<View>,
     >,
@@ -796,7 +873,7 @@ fn redraw(
         let Some(view) = children.iter().find(|child| views.contains(*child)) else {
             continue; // A construction spawned with no view attached has nothing to redraw.
         };
-        let (view, drawn, worn, own) = views
+        let (view, drawn, worn, mut own) = views
             .get_mut(view)
             .expect("the view child was found in this same query");
         let kind = &breakage.kind;
@@ -809,7 +886,12 @@ fn redraw(
             }
             (None, _) => {}
         }
-        let broken = broken_mesh(kind, &shape);
+        let mut fresh = Sections::default();
+        let sections = match own.as_deref_mut() {
+            Some(own) => &mut own.sections,
+            None => &mut fresh,
+        };
+        let broken = broken_mesh(kind, &shape, sections);
         let mesh = (broken.count_vertices() > 0).then(|| meshes.add(broken));
         let cracks = crack_mesh(&kind.layout, &shape, crate::vfx::construction_cracks())
             .map(|m| meshes.add(m));
@@ -824,12 +906,16 @@ fn redraw(
             (None, None) => {}
         }
         match own {
-            Some(OwnMesh {
-                cracks: Some(child),
-            }) => commands.entity(*child).despawn(),
-            Some(_) => {}
+            Some(own) => {
+                if let Some(child) = own.cracks {
+                    commands.entity(child).despawn();
+                }
+            }
             None => {
-                commands.entity(view).insert(OwnMesh { cracks: None });
+                commands.entity(view).insert(OwnMesh {
+                    cracks: None,
+                    sections: fresh,
+                });
             }
         }
         let material = match (&look, materials.as_deref_mut()) {
@@ -1322,7 +1408,7 @@ mod tests {
         kind.dressing = Dressing::bare(&layout);
         (kind.asset, kind.layout) = (asset, layout);
         let mut faces = Faces::default();
-        faces.element(&kind, 0);
+        faces.element(&kind, 0, &ElementLook::of(&kind.asset, 0));
         let triangles = triangles(&faces.mesh());
         let area: f32 = triangles
             .iter()
@@ -1434,6 +1520,8 @@ mod tests {
                 frame: SurfaceFrame::Upright,
                 run: run(&corners),
                 secondary: false,
+                relief: None,
+                core: [1.0; 3],
             };
             for n in [Vec3::Y, Vec3::NEG_Y] {
                 let mut faces = Faces::default();
@@ -1629,7 +1717,7 @@ mod tests {
             ] {
                 kind.asset.elements[e].surface_frame = frame;
                 let mut faces = Faces::default();
-                faces.element(&kind, e);
+                faces.element(&kind, e, &ElementLook::of(&kind.asset, e));
                 let mesh = faces.mesh();
                 assert_tagged_hulls(&mesh, &[(0.0, &kind.layout.element_blocks[e])], Vec3::ZERO);
                 let attribute = |id| match mesh.attribute(id) {
@@ -1710,12 +1798,16 @@ mod tests {
         packs.iter().map(|pack| pack[1]).collect()
     }
 
-    /// The first element the shipped house's layout splits into two chunks or more, and its chunks.
-    fn chunked_element(layout: &Layout) -> (usize, std::ops::Range<usize>) {
-        (0..layout.element_of.len())
-            .map(|e| (e, layout.chunks_of(e)))
-            .find(|(_, chunks)| chunks.len() >= 2)
-            .expect("the shipped house has a chunked element")
+    /// The first element of `kind` its layout splits into two chunks or more and its visual draws
+    /// bare, so each drawn vertex lies on its chunk's hull ([`relief`] moves a break's), and its
+    /// chunks.
+    fn chunked_element(kind: &ConstructionKind) -> (usize, std::ops::Range<usize>) {
+        (0..kind.layout.element_blocks.len())
+            .map(|e| (e, kind.layout.chunks_of(e)))
+            .find(|(e, chunks)| {
+                chunks.len() >= 2 && ElementLook::of(&kind.asset, *e).relief.is_none()
+            })
+            .expect("the shipped house has a chunked element drawn bare")
     }
 
     /// The shader's tags name authored solids, irrespective of the renderer's vertex topology.
@@ -1795,7 +1887,7 @@ mod tests {
     fn a_swapped_chunk_s_faces_carry_its_index_and_nothing_else_carries_one() {
         let kind = shipped_house();
         let layout = &kind.layout;
-        let (e, chunks) = chunked_element(layout);
+        let (e, chunks) = chunked_element(&kind);
         let mut shape = Shape::intact(layout);
         let intact: Vec<_> = layout
             .element_blocks
@@ -1812,7 +1904,11 @@ mod tests {
             .map(|(_, block)| (0.0, block))
             .collect();
         standing.extend(chunks.clone().map(|c| ((c + 1) as f32, &layout.blocks[c])));
-        assert_tagged_hulls(&broken_mesh(&kind, &shape), &standing, Vec3::ZERO);
+        assert_tagged_hulls(
+            &broken_mesh(&kind, &shape, &mut Sections::default()),
+            &standing,
+            Vec3::ZERO,
+        );
         let order = [chunks.start + 1, chunks.start];
         // Fixture: a nonzero origin also checks that ownership uses the authored frame.
         let origin = Vec3::new(0.7, 1.1, -0.4);
@@ -1836,7 +1932,7 @@ mod tests {
     fn the_hole_table_carries_each_standing_chunk_s_holes_and_hull() {
         let kind = shipped_house();
         let (asset, layout) = (&kind.asset, &kind.layout);
-        let (e, chunks) = chunked_element(layout);
+        let (e, chunks) = chunked_element(&kind);
         let (c, dust) = (chunks.start, chunks.start + 1);
         let mut shape = Shape::intact(layout);
         shape.swapped[e] = true;
@@ -1949,7 +2045,7 @@ mod tests {
         shared_look(&mut world);
         world.insert_resource(CurrentWorld(None));
         let kind = shipped_house();
-        let (_, chunks) = chunked_element(&kind.layout);
+        let (_, chunks) = chunked_element(&kind);
         let old = world
             .spawn((
                 MapInstance {
@@ -2019,7 +2115,7 @@ mod tests {
         let kind = shipped_house();
         let mut world = World::new();
         let shared = shared_look(&mut world);
-        let (e, chunks) = chunked_element(&kind.layout);
+        let (e, chunks) = chunked_element(&kind);
         let mut shape = Shape::intact(&kind.layout);
         shape.swapped[e] = true;
         let mut holes = ShownHoles(vec![Vec::new(); kind.layout.chunks.len()]);
@@ -2090,7 +2186,7 @@ mod tests {
         let (asset, layout) = (&kind.asset, &kind.layout);
         let mut world = World::new();
         let shared = shared_look(&mut world);
-        let (_, chunks) = chunked_element(layout);
+        let (_, chunks) = chunked_element(&kind);
         let (holed, plain) = (chunks.start, chunks.start + 1);
         let mut shape = Shape::intact(layout);
         shape.fate[holed] = Fate::Fallen;
@@ -2244,7 +2340,7 @@ mod tests {
         app.init_resource::<Record>()
             .insert_resource(crate::ClientReplica);
         plugin(&mut app);
-        let (e, range) = chunked_element(&kind.layout);
+        let (e, range) = chunked_element(&kind);
         let fallen: Vec<u16> = range.take(2).map(|c| c as u16).collect();
         let mut shape = Shape::intact(&kind.layout);
         shape.swapped[e] = true;
@@ -2311,7 +2407,7 @@ mod tests {
 
     fn split_handover(offset: u32) {
         let kind = shipped_house();
-        let (_, range) = chunked_element(&kind.layout);
+        let (_, range) = chunked_element(&kind);
         let chunks: Vec<_> = range.take(2).map(|c| c as u16).collect();
         assert_eq!(chunks.len(), 2);
         let mut world = World::new();
@@ -2434,7 +2530,10 @@ mod tests {
             );
         }
         let text = format!("(skin: [], cards: [{cards}])");
-        kind.dressing = Dressing::resolve(&text, &kind.asset, &kind.layout).expect("fixture cards");
+        kind.dressing = kind
+            .dressing
+            .resolve(&text, &kind.asset, &kind.layout)
+            .expect("fixture cards");
         for (card, &c) in kind.dressing.cards.iter().zip(owners) {
             assert_eq!(
                 card.owner, c,
@@ -2600,7 +2699,7 @@ mod tests {
                 p(base),
                 corners.join(", ")
             );
-            Dressing::resolve(&text, &kind.asset, &kind.layout)
+            kind.dressing.resolve(&text, &kind.asset, &kind.layout)
         };
         let shared = resolve(joint.centroid, "").expect("a base on a shared face");
         assert_eq!(shared.cards[0].owner, joint.a.min(b));
@@ -2610,7 +2709,10 @@ mod tests {
         let error = resolve(joint.centroid, "\"no_such_part\"").unwrap_err();
         assert!(error.contains("no element declares"), "{error}");
         let text = "(skin: [], cards: [(base: (0.0, 0.0, 0.0), corners: [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)])])";
-        let error = Dressing::resolve(text, &kind.asset, &kind.layout).unwrap_err();
+        let error = kind
+            .dressing
+            .resolve(text, &kind.asset, &kind.layout)
+            .unwrap_err();
         assert!(error.contains("one plane"), "{error}");
     }
 
@@ -2631,7 +2733,7 @@ mod tests {
         let skin = tint(crate::vfx::construction_dressing().skin_srgb);
         let mut shape = Shape::intact(&kind.layout);
         shape.swapped.fill(true);
-        let mesh = broken_mesh(kind, &shape);
+        let mesh = broken_mesh(kind, &shape, &mut Sections::default());
         let Some(VertexAttributeValues::Float32x4(colors)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
         else {
             panic!("colours");
@@ -2683,3 +2785,5 @@ mod tests {
         assert!(barked > 0 && cut > 0, "{barked} bark, {cut} cut triangles");
     }
 }
+
+// TEMPORARY cost probe for the brick-fracture lane's report; never committed.

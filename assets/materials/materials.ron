@@ -614,7 +614,7 @@
                 flow strength ~1 GPa, × 1000"))),
             visual: "brick",
             feedback: (
-                exposed_linear_rgb: ((0.45, 0.19, 0.11), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                exposed_linear_rgb: ((0.515, 0.107, 0.042), Taste("material contact and fracture effects: fired clay inside a brick, sRGB (190, 92, 58), as bright as brick_wall_006's photographed bricks' mean (171, 106, 73) and more saturated, unweathered; a hit's mark and a break face show it")),
                 powder_linear_rgb: ((0.4, 0.25, 0.18), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
                 metallic: (0.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
                 roughness_gain: (2.4, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
