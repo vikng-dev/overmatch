@@ -160,12 +160,11 @@ impl Coordinates {
                 "a dynamic drivetrain finishes its own mechanical coordinates, never a replica's"
             );
         };
-        *warm = drive
-            .current
-            .get()
-            .map_or_else(|| drive.seed.clone(), |c| c.warm.clone());
-        let solved = drive.prepared.mechanical.solve(drive.impulses, warm);
-        transmission::finish_advance(tp, state, &drive.prepared, &solved, h)
+        // An owner no solve-stage visit read (no belt contact, or warm application only) settles
+        // its totals here; otherwise this commits the solution the contacts exchanged against.
+        let current = drive.current();
+        warm.clone_from(&current.warm);
+        transmission::finish_advance(tp, state, &drive.prepared, &current.solved, h)
     }
 
     #[cfg(test)]
