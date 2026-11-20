@@ -307,6 +307,11 @@ Known differences between the channels, none tuned:
   fixture hull). What remains:
   - *Breakaway per search.* Decide each static row's breakaway once per interval from the
     complete totals after the biased pass, kinetic through relaxation; the second exit only caps.
+  - *One builder of the transmission input.* `DriveTick::contact_only` builds its input without
+    the slew, the authority mask or the tick `dt` that `drivetrain_tick` applies. It runs when
+    physics steps with no driving pass before it; the driving systems wait for `AppState::Playing`
+    and physics does not, so a server still loading can hand it live axes (DERIVED from the
+    schedules, not reproduced). Build both through one function.
   - *One normal per convex pair* (#378). A slice still meets matter beside the shoe with its pair's
     one normal, and a hull-fixed face, the sprocket's and idler's wraps, records no rise: there a
     slice bears matter under its edge as the stop does, and the exposed-face admission alone keeps
