@@ -459,6 +459,7 @@ class RamTests(unittest.TestCase):
         ram = dict(recipe=recipe, plan=dict(minimum_m_s=9, governed_m_s=10, runup_m=20, clear_m=10,
                                            spawn=[0, 0, 0], rotation=[0, 0, 0, 1]),
                    impact=dict(tick=2, speed_m_s=10, normal_speed_m_s=10), done="deadline", ticks=ticks,
+                   structure=dict(above_grade_m3=2, in_place_m3=1, in_place_share=0.5, opening_m2=1),
                    sends=[dict(tick=1, us=1000), dict(tick=3, us=40)], pieces=EMPTY_PIECES)
         return recipe, ram
 
@@ -634,7 +635,7 @@ class RamTests(unittest.TestCase):
     def test_ram_refuses_slow_impact_missing_ticks_and_incompatible_logs(self):
         recipe, ram = self.fixture()
         for field, value in [("impact", dict(tick=2, speed_m_s=8, normal_speed_m_s=8)), ("done", "unknown"),
-                             ("impact", dict(tick=2, speed_m_s=None, normal_speed_m_s=10))]:
+                             ("impact", dict(tick=2, speed_m_s=None, normal_speed_m_s=10)), ("structure", None)]:
             changed = dict(ram, **{field: value})
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 collapse.ram_summary(self.text(changed), recipe)

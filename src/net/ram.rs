@@ -19,7 +19,7 @@ use crate::{
     command::ParsedTankCommand,
     construction::{
         Body,
-        breakage::{Breakage, Piece, SweepAccount},
+        breakage::{Breakage, GRADE_M, Piece, SweepAccount},
     },
     contact_transfer::ContactTransfers,
     cost::{
@@ -34,6 +34,8 @@ use crate::{
     terrain_grid::{HeightGrid, Stance, spawn_pos},
     track::sim::TrackDrive,
 };
+
+mod structure;
 
 const LEVER: &str = "OVERMATCH_RAM";
 
@@ -89,6 +91,7 @@ struct Plan {
     /// DERIVED: where the hull's root has carried its rear past the construction, along the
     /// heading from the map origin, m: the construction's far bound plus the tank's stance reach.
     clear_m: f32,
+    panel: structure::Panel,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
@@ -112,6 +115,8 @@ pub(super) struct Ram {
     impact_tick: Option<u64>,
     resting_s: f64,
     done: Option<End>,
+    /// The struck construction once the capture ends at rest or its deadline.
+    structure: Option<structure::Reading>,
     target: Option<Entity>,
     pub(super) trace: Trace<RamWork>,
 }
@@ -293,6 +298,16 @@ impl Recipe {
             .map(|k| Vec3::select(BVec3::new(k & 1 > 0, k & 2 > 0, k & 4 > 0), max, min))
             .map(|corner| pose.transform_point(corner).dot(direction))
             .fold(f32::NEG_INFINITY, f32::max);
+        // The approach in the construction's frame, at the hull root's height over its ground.
+        let turn = pose.rotation.inverse();
+        let origin = turn * (direction * -runup_m) + Vec3::Y * (GRADE_M + stance.depth_m);
+        let panel = structure::Panel::met(kind, origin, turn * direction).map_err(|why| {
+            let value = format!(
+                "instance {} heading_deg {}",
+                self.instance, self.heading_deg
+            );
+            LeverError::invalid(LEVER, value, why)
+        })?;
         Ok(Plan {
             spawn: spawn.to_array(),
             rotation: rotation.to_array(),
@@ -300,6 +315,7 @@ impl Recipe {
             governed_m_s,
             minimum_m_s: f64::from(governed_m_s) * self.minimum_speed_fraction,
             clear_m: far + stance.reach_m,
+            panel,
         })
     }
 }
@@ -343,6 +359,7 @@ impl Ram {
             impact_tick: None,
             resting_s: 0.0,
             done: None,
+            structure: None,
             target: None,
             trace: Trace::default(),
         }
@@ -360,7 +377,7 @@ impl Ram {
     pub(super) fn json(&mut self) -> Value {
         let (ticks, sends) = self.trace.drain();
         json!({"recipe": self.recipe, "plan": self.plan, "impact": self.impact,
-            "done": self.done, "ticks": ticks, "sends": sends})
+            "done": self.done, "structure": self.structure, "ticks": ticks, "sends": sends})
     }
 }
 
@@ -456,6 +473,18 @@ pub(super) struct Census<'w, 's> {
         ),
     >,
     constructions: Query<'w, 's, (Entity, &'static MapInstance, &'static Breakage), With<Body>>,
+    poses: Query<'w, 's, (&'static Position, &'static Rotation)>,
+    loose: Query<
+        'w,
+        's,
+        (
+            &'static Piece,
+            &'static Breakage,
+            &'static Position,
+            &'static Rotation,
+            &'static LinearVelocity,
+        ),
+    >,
     contacts: Res<'w, ContactTransfers>,
     sweep: Res<'w, SweepAccount>,
     avian: AvianDiagnostics<'w, 's>,
@@ -660,7 +689,7 @@ impl Census<'_, '_> {
             let target = self
                 .constructions
                 .iter()
-                .find(|(_, id, _)| id.id == ram.recipe.instance)
+                .find(|(_, id, ..)| id.id == ram.recipe.instance)
                 .expect("the admitted ram construction exists throughout its capture")
                 .0;
             ram.target = Some(target);
@@ -740,6 +769,22 @@ impl Census<'_, '_> {
             }
         } else if tick as f64 * sample.dt_s >= ram.recipe.approach_s {
             ram.done = Some(End::ApproachTimeout);
+        }
+        if matches!(ram.done, Some(End::Rest | End::Deadline)) {
+            let (.., root) =
+                (self.constructions.get(target)).expect("the target was checked this tick");
+            let (position, rotation) =
+                (self.poses.get(target)).expect("a construction's standing body has a pose");
+            let pieces = (self.loose.iter())
+                .filter(|(piece, ..)| {
+                    piece.construction == root.construction && piece.retired.is_none()
+                })
+                .map(|(piece, breakage, position, rotation, velocity)| {
+                    let frame = breakage.physics_frame((position, rotation));
+                    (piece, breakage, frame, velocity.0.length())
+                });
+            let built = root.physics_frame((position, rotation));
+            ram.structure = Some(structure::read(&plan.panel, (root, built), pieces));
         }
         Some(&mut row.collector_us)
     }
@@ -962,6 +1007,7 @@ mod tests {
             governed_m_s: 1.0,
             minimum_m_s: 1.0,
             clear_m: 1.0,
+            panel: structure::tests::column_panel(),
         });
         ram.started = true;
         ram

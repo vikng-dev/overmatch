@@ -783,6 +783,9 @@ HULL_DEFINITIONS = dict(
     crossing_s="from the contact tick to the first tick the hull's position along the recipe heading reaches plan.clear_m "
                "(the construction's far bound plus the tank's stance reach, so its rear has cleared); null when the capture ends first",
     stall_s="seconds from the contact tick on with forward speed <= 0",
+    structure="the struck construction at the capture's end (src/net/ram/structure.rs): in place is a chunk a body "
+              "still carries within its own bounding radius of where it was built; the share counts volume built above "
+              "grade; the opening is the departed area of plan.panel's face, clipped at grade",
 )
 
 
@@ -799,6 +802,12 @@ def ram_summary(text, recipe):
         raise RuntimeError(f"ram observation invalidated: {last['done']}")
     if not impact:
         raise RuntimeError("completed ram has no measured impact")
+    structure = last["structure"]
+    try:
+        for field in ("above_grade_m3", "in_place_m3", "in_place_share", "opening_m2"):
+            finite(structure[field], f"structure.{field}")
+    except (ValueError, KeyError, TypeError) as error:
+        raise RuntimeError(f"completed ram has no structure reading: {error}") from error
     window = [t for t in ticks if t["tick"] >= impact["tick"]]
     if not window:
         raise RuntimeError("ram has no measured contact window")
@@ -820,7 +829,7 @@ def ram_summary(text, recipe):
                 largest_forward_change_m_s=max((h["forward_change_m_s"] for h in hulls), key=abs),
                 crossing_s=None if crossing is None else (crossing - impact["tick"])*dt,
                 stall_s=sum(h["forward_m_s"] <= 0 for h in hulls)*dt,
-                definitions=HULL_DEFINITIONS,
+                structure=structure, definitions=HULL_DEFINITIONS,
                 first_tick=window[0]["tick"], last_tick=window[-1]["tick"], window_s=len(window)*dt,
                 worst_tick=worst, p99_us=ordered[math.ceil(0.99*len(ordered))-1],
                 worst_tick_attribution=tick_attribution(worst),

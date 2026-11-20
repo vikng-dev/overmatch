@@ -54,4 +54,7 @@ the sweep's exchange, N s, and the sweep's verdicts on the cuts the hull met. Th
 support and traction and gravity are not channels, so the channels do not sum to m·Δv.
 `impact.speed_m_s` is the horizontal speed of the row before first contact. `result.json` adds
 `min_forward_m_s`, `largest_forward_change_m_s`, `crossing_s` and `stall_s`, from the contact tick
-on, each defined in its `definitions`.
+on, each defined in its `definitions`. The server's last line adds `structure`, the struck
+construction at the capture's end (`src/net/ram/structure.rs`): the share of its volume built above
+grade still in place, the opening in `plan.panel` (the component the approach ray meets, chosen
+before play), and the largest loose piece.
