@@ -65,12 +65,11 @@
 //! (`contact_transfer`, resting contacts).
 //!
 //! ORDER. Avian finds a switched body's new pairs, and so builds and solves its contacts, in the
-//! order the bodies switched (`collider_tree/update.rs`, `MovedProxies`: insertion order). The thaw
-//! switches its pieces in the order of the pose bits they froze at ([`Frozen`]), the entity only
-//! breaking a tie: an entity id follows a run's allocation history, which two runs of one scene
-//! need not share. Freeze takes islands in Avian's island order and switches their pieces in entity
-//! order, which is not shown to reach a solve: in `freeze_and_thaw_follow_no_entity_id` it changes
-//! and no pose bit does. A hash set's order follows the entities' bits.
+//! order the bodies switched (`collider_tree/update.rs`, `MovedProxies`: insertion order). Freeze
+//! and thaw each switch a tick's pieces in the order of their pose bits as they froze
+//! ([`Frozen`]), the entity only breaking a tie: an entity id follows a run's allocation history,
+//! which two runs of one scene need not share. Which islands a tick's budget freezes follows
+//! Avian's island order.
 //!
 //! COST, OPEN. The reach casts at most one spatial query per body it evaluates, and exactly one
 //! when the body has a solid collider with nonempty masks (`Reach::of`); it evaluates each awake
@@ -653,7 +652,7 @@ enum Support {
 /// Freeze every sleeping island of loose pieces that touches fixed matter, that no mover reaches
 /// and that nothing has woken since the step, within the tick's budget (module doc). Gathering
 /// the sleeping pieces, the reach and each candidate's support read only the step's state; the
-/// budget and the switches apply after them, in island order.
+/// budget applies after them in island order, then the switches in pose order.
 fn freeze(p: Freeze, mut commands: Commands) {
     let Freeze {
         sleeping,
@@ -764,6 +763,7 @@ fn freeze(p: Freeze, mut commands: Commands) {
         })
     };
     let (mut froze, mut met) = (0, 0);
+    let mut switches = Vec::new();
     for (pieces, support) in candidates.into_iter().zip(supports.into_iter().flatten()) {
         if froze > 0 && froze + pieces.len() > FREEZE_PIECE_BUDGET {
             break;
@@ -792,23 +792,10 @@ fn freeze(p: Freeze, mut commands: Commands) {
         for &collider in own.iter().chain(&touched) {
             islands.by_collider.entry(collider).or_default().push(id);
         }
-        for &piece in &pieces {
+        switches.extend(pieces.iter().map(|&piece| {
             let (.., (at, turn), _) = sleeping.get(piece).expect("a sleeping island's piece");
-            // ADR-0014 exception (module doc). Static before `Sleeping` goes, so the wake its
-            // removal queues finds the piece outside its island.
-            commands
-                .entity(piece)
-                .insert((
-                    RigidBody::Static,
-                    LinearVelocity::ZERO,
-                    AngularVelocity::ZERO,
-                    Frozen {
-                        island: id,
-                        pose: pose_bits(&at, &turn),
-                    },
-                ))
-                .remove::<Sleeping>();
-        }
+            (pose_bits(&at, &turn), piece, id)
+        }));
         islands.islands.insert(
             id,
             Island {
@@ -817,6 +804,21 @@ fn freeze(p: Freeze, mut commands: Commands) {
                 touched,
             },
         );
+    }
+    // Pose order, the entity only breaking a tie (module doc, ORDER).
+    switches.sort_unstable_by_key(|&(pose, piece, _)| (pose, piece));
+    for (pose, piece, island) in switches {
+        // ADR-0014 exception (module doc). Static before `Sleeping` goes, so the wake its
+        // removal queues finds the piece outside its island.
+        commands
+            .entity(piece)
+            .insert((
+                RigidBody::Static,
+                LinearVelocity::ZERO,
+                AngularVelocity::ZERO,
+                Frozen { island, pose },
+            ))
+            .remove::<Sleeping>();
     }
     if let Some(stages) = stages.as_deref() {
         stages.add(Work::FrozePieces, froze as u64);
@@ -1799,41 +1801,54 @@ mod tests {
         }
     }
 
-    /// Three stacks of three side by side, frozen on a slab as one island, then a mover sliding
-    /// into them: the pieces, and every piece's pose bits and whether it is frozen, every update.
+    /// Three stacks of three side by side, settling and freezing on a slab as one island, then a
+    /// mover sliding into them: the pieces, and every piece's pose bits and whether it is frozen,
+    /// every update from the stacks' spawn.
     fn freeze_thaw_trace(app: &mut App) -> (Vec<Entity>, Vec<(Vec<[u32; 7]>, Vec<bool>)>) {
         slab(app, 0.0);
         let pieces: Vec<_> = [-SIDE, 0.0, SIDE]
             .into_iter()
             .flat_map(|x| stack(app, x, 0.0, 3))
             .collect();
-        until_frozen(app, &pieces);
+        let step = |app: &mut App| {
+            app.update();
+            let world = app.world();
+            let poses = (pieces.iter())
+                .map(|&piece| {
+                    let at = world.get::<Position>(piece).unwrap();
+                    pose_bits(at, world.get::<Rotation>(piece).unwrap())
+                })
+                .collect();
+            let frozen: Vec<bool> = pieces.iter().map(|&piece| is_frozen(app, piece)).collect();
+            (poses, frozen)
+        };
+        let mut trace = Vec::new();
+        loop {
+            // Fixture: at most 10 s to rest and freeze.
+            assert!(
+                trace.len() < 640,
+                "the stacks came to rest and froze within 10 s"
+            );
+            let (poses, frozen) = step(app);
+            let all = !frozen.contains(&false);
+            trace.push((poses, frozen));
+            if all {
+                break;
+            }
+        }
         mover(app, Vec3::new(-3.0, SIDE * 0.75, 0.0), 3.0)
             .insert(CollisionLayers::new([Layer::Vehicle], LayerMask::ALL));
-        let trace = (0..320)
-            .map(|_| {
-                app.update();
-                let world = app.world();
-                let poses = pieces
-                    .iter()
-                    .map(|&piece| {
-                        let p = world.get::<Position>(piece).unwrap().0;
-                        let r = world.get::<Rotation>(piece).unwrap().0;
-                        [p.x, p.y, p.z, r.x, r.y, r.z, r.w].map(f32::to_bits)
-                    })
-                    .collect();
-                let frozen = pieces.iter().map(|&piece| is_frozen(app, piece)).collect();
-                (poses, frozen)
-            })
-            .collect();
+        trace.extend((0..320).map(|_| step(app)));
         (pieces, trace)
     }
 
     /// FREEZE AND THAW FOLLOW NO ENTITY ID: the same scene, built on fresh entities, after other
     /// entities shift every id's bits while keeping their order, and on freed ids reused
-    /// last-freed first, which reorders them, repeats every pose bit and every freeze and thaw.
-    /// A switch in a hash set's order parts at the shift, one in entity order at the reuse
-    /// (module doc, ORDER); a same-recipe replay of the ram instrument relies on neither.
+    /// last-freed first, which reorders them, repeats every pose bit and every freeze and thaw
+    /// from the stacks' spawn. A thaw switching in a hash set's order parts at the shift, one in
+    /// entity order at the reuse (module doc, ORDER); a same-recipe replay of the ram instrument
+    /// relies on neither. A freeze switching in entity order is not separated: no solve here reads
+    /// a frozen piece's switch order, so the freeze holds the thaw's key by construction.
     #[test]
     fn freeze_and_thaw_follow_no_entity_id() {
         let trace = |prepare: fn(&mut App)| {
@@ -1874,7 +1889,7 @@ mod tests {
             for (update, (a, b)) in plain.iter().zip(&trace).enumerate() {
                 assert_eq!(
                     a, b,
-                    "{layout} ids, update {update} after the mover's spawn"
+                    "{layout} ids, update {update} after the stacks' spawn"
                 );
             }
         }
