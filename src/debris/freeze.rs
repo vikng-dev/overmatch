@@ -1842,15 +1842,16 @@ mod tests {
         (pieces, trace)
     }
 
-    /// FREEZE AND THAW FOLLOW NO ENTITY ID: the same scene, built on fresh entities, after other
-    /// entities shift every id's bits while keeping their order, and on freed ids reused
-    /// last-freed first, which reorders them, repeats every pose bit and every freeze and thaw
-    /// from the stacks' spawn. A thaw switching in a hash set's order parts at the shift, one in
-    /// entity order at the reuse (module doc, ORDER); a same-recipe replay of the ram instrument
-    /// relies on neither. A freeze switching in entity order is not separated: no solve here reads
-    /// a frozen piece's switch order, so the freeze holds the thaw's key by construction.
+    /// THE THAW'S ORDER, AND WHICH PIECES FREEZE AND WHEN, FOLLOW NO ENTITY ID: the same scene,
+    /// built on fresh entities, after other entities shift every id's bits while keeping their
+    /// order, and on freed ids reused last-freed first, which reorders them, repeats every pose bit
+    /// and every freeze and thaw from the stacks' spawn. A thaw switching in a hash set's order
+    /// parts at the shift, one in entity order at the reuse (module doc, ORDER); a same-recipe
+    /// replay of the ram instrument relies on neither. A freeze switching in entity order stays
+    /// green: no solve here reads a frozen piece's switch order, so the freeze holds the thaw's key
+    /// by construction.
     #[test]
-    fn freeze_and_thaw_follow_no_entity_id() {
+    fn thaw_order_and_what_freezes_when_follow_no_entity_id() {
         let trace = |prepare: fn(&mut App)| {
             let mut app = settling(GRAVITY);
             prepare(&mut app);

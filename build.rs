@@ -37,8 +37,9 @@ fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets it"));
     println!("cargo:rerun-if-changed=build.rs");
-    let mut features: Vec<String> = std::env::vars()
-        .filter_map(|(key, _)| Some(key.strip_prefix("CARGO_FEATURE_")?.to_lowercase()))
+    // `vars_os`: a variable that is not Unicode, which no feature name is, cannot panic the build.
+    let mut features: Vec<String> = std::env::vars_os()
+        .filter_map(|(key, _)| Some(key.to_str()?.strip_prefix("CARGO_FEATURE_")?.to_lowercase()))
         .collect();
     features.sort();
     println!("cargo:rustc-env=OVERMATCH_FEATURES={}", features.join(","));

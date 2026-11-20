@@ -167,7 +167,8 @@ def verdict(a, b):
     and at the capture's end by construction and chunk, never by entity. Over UDP each run's input
     arrives on its own tick; the keying holds while the hull rests before it: the rows agree tick
     for tick from spawn, and the later run held the earlier one's last row until its own onset.
-    Otherwise the state differs before input. After the onset, over the ticks both runs hold,
+    Otherwise the state differs before input. The hull's rest stands in for the world's, so a
+    server system phased on the absolute tick also reads as state differs when the onsets differ. After the onset, over the ticks both runs hold,
     inputs first, then state: equal; inputs differ (outside input, not a replay); or state differs,
     where the same inputs gave different state, at a field or at an unequal end (`last_tick`)."""
     onsets = [onset(a, "a"), onset(b, "b")]
