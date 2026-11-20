@@ -26,9 +26,8 @@ The existing 0.8.0 mechanisms cannot supply that coordinate:
 The local extension exposes adapter-typed, cloneable transient scratch in `SolverBody` and
 surface-coordinate coefficients on `ContactConstraint`. One process-wide friction callback is
 registered before any coordinates are bound. It runs under graph coloring after both normal
-passes, with pass identity, and receives warm start after the rigid-body warm impulse. The seam
-chooses when to solve. Its accumulator records the applied impulse; game-side readers share
-one accessor for that convention. Ordinary contacts retain stock friction. Scratch is rebuilt
+passes and receives warm start after the rigid-body warm impulse. Its accumulator records the
+applied impulse; game-side readers share one accessor for that convention. Ordinary contacts retain stock friction. Scratch is rebuilt
 before solving, including after deserialization.
 
 The game owns the surface trait, capped contact row and drivetrain implementation; their
