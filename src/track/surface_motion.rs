@@ -99,6 +99,16 @@ impl Drivetrain {
             .get_mut()
             .expect("the current totals were just settled");
         let mechanical = &self.prepared.mechanical;
+        if let Some(next) = solved.step(
+            response,
+            &mechanical.rows,
+            &mechanical.limits,
+            index + 1,
+            impulse,
+        ) {
+            *solved = next;
+            return false;
+        }
         let next = mechanical.solve(self.impulses, warm);
         let changed = !solved.same_face(&next);
         if changed {
@@ -370,6 +380,103 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every contact visit reads its owner's speeds after a push. A step along the current face
+    /// must reach the face and speeds a fresh search finds from the same totals. Fixture: class
+    /// drivetrains driven and braked, parked or not, from rest and moving, with seeded pushes of
+    /// up to five brake capacities that cross held, sliding and limited faces.
+    #[test]
+    fn face_steps_agree_with_a_fresh_search() {
+        use crate::track::drive::{DriveAxes, DriveIntent, DriveTarget};
+        use crate::track::drive_fixture::{class_drivetrains, construction};
+        use transmission::{DriveState, DriveSupply, DriveTick, TransmissionState};
+        let (mut stepped, mut searched, mut worst) = (0, 0, 0.0_f64);
+        for (fp, tp) in class_drivetrains() {
+            let fp = construction(&fp);
+            let h = 1.0 / 384.0; // Fixture interval, s.
+            let axes = DriveIntent::Axes(DriveAxes {
+                throttle: 0.5,
+                steer: 0.4,
+            });
+            for intent in [axes, DriveIntent::Brake] {
+                for park in [false, true] {
+                    for speeds in [[0.0; 2], [1.0, -2.0], [4.0; 2]] {
+                        let state = DriveState {
+                            transmission: TransmissionState {
+                                omega_e: 100.0,
+                                park,
+                                mean_hold: false,
+                                ..TransmissionState::from_spec(&tp)
+                            },
+                            speeds,
+                            phases: [0.0; 2],
+                        };
+                        let supply = DriveSupply {
+                            control_authority: true,
+                            task_rate: 1.0,
+                            engine_in_action: true,
+                            transmission_condition: 1.0,
+                        };
+                        let mut tick = DriveTick::contact_only(
+                            &fp,
+                            &tp,
+                            state,
+                            DriveTarget { supply, intent },
+                            h,
+                        );
+                        let mut coordinates = tick.prepare_contact(&fp, &tp, h, false);
+                        let scale = 10.0 * f64::from(tp.brake_capacity_n * h);
+                        let mut random = 0x1234_5678_u32;
+                        for i in 0..100 {
+                            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                            let impulse = (f64::from(random) / f64::from(u32::MAX) - 0.5) * scale;
+                            let index = i % 2;
+                            {
+                                let Coordinates::Drivetrain(drive) = &coordinates else {
+                                    panic!("the fixture prepares a dynamic drivetrain")
+                                };
+                                let current = drive.current();
+                                let mechanical = &drive.prepared.mechanical;
+                                let mut totals = drive.impulses;
+                                totals[index] += impulse;
+                                let fresh = mechanical.solve(totals, &mut current.warm.clone());
+                                match current.solved.step(
+                                    &current.response,
+                                    &mechanical.rows,
+                                    &mechanical.limits,
+                                    index + 1,
+                                    impulse,
+                                ) {
+                                    Some(step) => {
+                                        stepped += 1;
+                                        assert!(
+                                            step.same_face(&fresh),
+                                            "a certified step keeps the face"
+                                        );
+                                        for (a, b) in step.speeds.iter().zip(&fresh.speeds) {
+                                            worst = worst.max((a - b).abs() / (1.0 + b.abs()));
+                                        }
+                                    }
+                                    None => searched += 1,
+                                }
+                            }
+                            coordinates.push(index, impulse);
+                        }
+                    }
+                }
+            }
+        }
+        println!("FACE_STEP stepped={stepped} searched={searched} worst_relative={worst:e}");
+        assert!(
+            stepped > 0 && searched > 0,
+            "the fixture must both step along faces and cross them"
+        );
+        // Resolution: the contact stores impulses in f32; a step must agree below that rounding.
+        assert!(
+            worst <= f64::from(f32::EPSILON),
+            "worst relative speed gap {worst:e}"
+        );
     }
 }
 

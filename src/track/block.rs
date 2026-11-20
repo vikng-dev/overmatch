@@ -85,12 +85,23 @@ pub(crate) struct Solution {
     #[cfg(feature = "bitprobe")]
     pub assignments_tried: usize,
     assignment: Inline<State>,
+    /// One shadow price per limit, zero while the limit is interior.
+    multipliers: Inline<f64>,
+    /// Independent zero-multiplier equalities whose targets the speeds satisfy exactly.
+    held: Inline<usize>,
 }
 
 /// Affine response while a bounded block stays on one KKT face.
 #[derive(Clone, Debug)]
 pub(crate) struct FaceResponse {
     pub(crate) mobility: Inline<Inline<f64>>,
+    /// Per free-impulse column: interior row impulses, then active limit multipliers.
+    sensitivity: Inline<Inline<f64>>,
+    interior: Inline<usize>,
+    active: Inline<usize>,
+    /// A row broke static capacity within this interval. A search restarts it static and may
+    /// hold it again, which this sliding face cannot certify.
+    broke: bool,
 }
 
 struct FaceSystem {
@@ -153,11 +164,14 @@ impl Solution {
         limits: &[ImpulseLimit],
     ) -> FaceResponse {
         let FaceSystem {
-            interior, matrix, ..
+            interior,
+            active,
+            matrix,
         } = face_system(speeds, rows, limits, &self.assignment);
         let nf = interior.len();
         let size = matrix.len();
         let mut mobility = Inline::with_capacity(speeds.len());
+        let mut sensitivity = Inline::with_capacity(speeds.len());
         for column in 0..speeds.len() {
             let mut matrix = matrix.clone();
             for (i, &ri) in interior.iter().enumerate() {
@@ -189,8 +203,97 @@ impl Solution {
                     })
                     .collect(),
             );
+            sensitivity.push(answer);
         }
-        FaceResponse { mobility }
+        let start: Inline<_> = speeds.iter().map(|s| s.value).collect();
+        FaceResponse {
+            mobility,
+            sensitivity,
+            interior,
+            active,
+            broke: rows
+                .iter()
+                .zip(&self.rows)
+                .any(|(row, result)| result.dynamic && !row.starts_sliding(&start)),
+        }
+    }
+
+    /// This face's solution after `delta` more free impulse on speed `column`, or `None` when the
+    /// face cannot certify it and the caller searches. On one face, impulses, multipliers and
+    /// speeds are affine in free impulse; a search trial's feasibility, optimality and breakaway
+    /// tests accept the step, and held equalities substitute their targets exactly again.
+    pub(crate) fn step(
+        &self,
+        response: &FaceResponse,
+        rows: &[Row],
+        limits: &[ImpulseLimit],
+        column: usize,
+        delta: f64,
+    ) -> Option<Self> {
+        if response.broke {
+            return None;
+        }
+        let rate = &response.sensitivity[column];
+        let nf = response.interior.len();
+        let mut impulses: Inline<_> = self.rows.iter().map(|r| r.impulse).collect();
+        for (&i, d) in response.interior.iter().zip(rate) {
+            impulses[i] += d * delta;
+        }
+        let mut multipliers = self.multipliers.clone();
+        for (&j, d) in response.active.iter().zip(&rate[nf..]) {
+            multipliers[j] += d * delta;
+        }
+        let mut speeds: Inline<_> = self
+            .speeds
+            .iter()
+            .zip(&response.mobility[column])
+            .map(|(v, m)| v + m * delta)
+            .collect();
+        let bounds: Inline<_> = rows
+            .iter()
+            .zip(&self.rows)
+            .map(|(row, result)| match row.dynamic {
+                Some(sliding) if result.dynamic => sliding,
+                _ => row.bounds,
+            })
+            .collect();
+        if !check_face(
+            rows,
+            &bounds,
+            limits,
+            &self.assignment,
+            &speeds,
+            &mut impulses,
+            &multipliers,
+        ) || physical_equalities(rows, limits, &self.assignment, &multipliers)
+            != physical_equalities(rows, limits, &self.assignment, &self.multipliers)
+        {
+            return None;
+        }
+        snap(&mut speeds, rows, &self.held);
+        if rows.iter().zip(&self.rows).any(|(row, result)| {
+            !result.dynamic
+                && row.dynamic.is_some()
+                && (dot(&row.jacobian, &speeds) - row.target).abs() > row.slip_tolerance(&speeds)
+        }) {
+            return None; // A static row breaks away; the search applies its sliding bounds.
+        }
+        Some(Self {
+            speeds,
+            rows: impulses
+                .into_iter()
+                .zip(&self.rows)
+                .map(|(impulse, result)| RowResult {
+                    impulse,
+                    dynamic: result.dynamic,
+                })
+                .collect(),
+            #[cfg(feature = "bitprobe")]
+            assignments_tried: 0,
+            assignment: self.assignment.clone(),
+            multipliers,
+            held: self.held.clone(),
+        })
     }
 }
 
@@ -662,6 +765,8 @@ impl Search<'_> {
                     dynamic: false,
                 })
                 .collect(),
+            multipliers,
+            held: independent,
         })
     }
 }
