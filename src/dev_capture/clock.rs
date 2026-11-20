@@ -1,8 +1,7 @@
 //! Offline and sandbox loading frames consume no time or fixed ticks. All their capture cues,
 //! including the game's damage-model cues (game state only), share the placement origin.
 //! Online clients and dedicated servers count from startup: loading consumes time there and
-//! network arrivals are live input, never repeatable. A scripted client's frames count from its
-//! tank's approach instead (`Anchor::Approach`), on the same live clock.
+//! network arrivals are live input, never repeatable.
 //!
 //! [`install`] suspends the selected pacing; [`start_clock`] restores it before Bevy's time
 //! update when the composition is ready. [`Cues`] gates every timeline consumer during loading.
@@ -28,9 +27,10 @@ pub enum Anchor {
     TrackRig,
     /// Online clients and dedicated servers keep their startup clock, including loading time.
     Startup,
-    /// A scripted network client keeps its startup clock; its frames count from the first frame
-    /// its controlled tank comes within the plan's `frames.lead_m` of this construction instance.
-    Approach(String),
+    /// A scripted network client keeps its startup clock; its frames count from its controlled
+    /// tank's approach to construction `instance` (the plan's `frames.lead_s`), and a follow
+    /// camera is posed in the approach's frame, which `heading` turns -Z onto the travel.
+    Approach { instance: String, heading: Quat },
 }
 
 /// Only compositions that suspend time have a readiness gate.
@@ -62,7 +62,7 @@ pub(super) fn install(app: &mut App, anchor: &Anchor) {
     let gate = match anchor {
         // Startup precedes the first time update (Bevy 0.20.1 Main::run_main). The server runner
         // owns its primed real clock and tick admission; presentation must preserve both.
-        Anchor::Startup | Anchor::Approach(_) => {
+        Anchor::Startup | Anchor::Approach { .. } => {
             app.insert_resource(Clock::Running);
             return;
         }
@@ -323,7 +323,7 @@ mod tests {
                     assert!(message.contains("1 of 2 tank views bound"), "{message}")
                 }
                 Anchor::TrackRig => assert!(message.contains("rig geometry absent"), "{message}"),
-                Anchor::Startup | Anchor::Approach(_) => {
+                Anchor::Startup | Anchor::Approach { .. } => {
                     unreachable!("fixture uses only waiting gates")
                 }
             }

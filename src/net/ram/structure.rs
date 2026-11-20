@@ -2,11 +2,13 @@
 //! only): the struck panel's opening, how much of the construction stands in place, and the
 //! largest loose piece. Read in the construction frame and keyed by chunk, never by entity.
 //!
-//! IN PLACE. A chunk is in place while a body carries it (its fate there is standing) with its
-//! centroid within its own bounding radius (its hull's farthest corner from the centroid) of where
-//! it was built: the chunk's own geometry, no tolerance to tune. A standing chunk and a roof
-//! resting on its walls count, a heap does not. The share counts volume built above grade
-//! ([`GRADE_M`], the centroid's height); chunks built below it are counted apart.
+//! IN PLACE. A chunk's displacement is the farthest any corner of its hull lies from where it was
+//! built, so a chunk turned about its centroid has moved. A chunk is in place while a body carries
+//! it (its fate there is standing) with its displacement within the recipe's `in_place_m`, one
+//! `Unit` for every chunk whose note says why that scale. A standing chunk and a roof resting on
+//! its walls count, a heap does not. The share counts volume built above grade ([`GRADE_M`], the
+//! centroid's height); chunks built below it are counted apart. The volume-weighted displacement of
+//! what a body still carries above grade is read beside it, for a reader judging the limit.
 //!
 //! PANEL. The construction component the approaching tank meets first: the element that a ray
 //! along the recipe's heading from any point of the tank's collision construction enters first.
@@ -113,6 +115,10 @@ pub(super) struct Reading {
     above_grade_m3: f32,
     in_place_m3: f32,
     in_place_share: f32,
+    /// Volume built above grade that a body still carries, m³, and its displacement weighted by
+    /// volume, m; none while a body carries none of it.
+    carried_m3: f32,
+    displacement_m: Option<f32>,
     /// Chunks built below grade, outside the share.
     below_grade_chunks: usize,
     /// The panel's face area over its chunks not in place, m².
@@ -129,9 +135,10 @@ struct LargestPiece {
 }
 
 /// The reading of `root`, the construction's standing body at its built frame, and `pieces`, its
-/// live loose pieces each with its frame and speed (m/s).
+/// live loose pieces each with its frame and speed (m/s), under the in-place limit `in_place_m`.
 pub(super) fn read<'a>(
     panel: &Panel,
+    in_place_m: f32,
     (root, built): (&Breakage, Transform),
     pieces: impl Iterator<Item = (&'a Piece, &'a Breakage, Transform, f32)>,
 ) -> Reading {
@@ -160,21 +167,26 @@ pub(super) fn read<'a>(
     let kind = &root.kind;
     let (at, normal) = (Vec3::from(panel.at), Vec3::from(panel.normal));
     let (mut above, mut in_place_m3, mut below, mut opening) = (0.0, 0.0, 0, 0.0);
+    // Carried volume, m³, and the sum of its chunks' volume times displacement, m⁴.
+    let (mut carried_m3, mut moved_m4) = (0.0, 0.0);
     let mut displaced = Vec::new();
     for (c, chunk) in chunks.iter().enumerate() {
         let block = &kind.layout.blocks[c];
-        let radius = (block.points.iter())
-            .map(|p| p.distance(chunk.centroid))
-            .fold(0.0, f32::max);
-        let built_at = built.transform_point(chunk.centroid);
-        let in_place = carried[c].is_some_and(|frame| {
-            frame.transform_point(chunk.centroid).distance(built_at) <= radius
+        let moved = carried[c].map(|frame| {
+            (block.points.iter())
+                .map(|&p| frame.transform_point(p).distance(built.transform_point(p)))
+                .fold(0.0, f32::max)
         });
+        let in_place = moved.is_some_and(|moved| moved <= in_place_m);
         if chunk.centroid.y < GRADE_M {
             below += 1;
         } else {
             above += chunk.volume;
             in_place_m3 += if in_place { chunk.volume } else { 0.0 };
+            if let Some(moved) = moved {
+                carried_m3 += chunk.volume;
+                moved_m4 += chunk.volume * moved;
+            }
         }
         if !in_place {
             displaced.push(u16::try_from(c).expect("the layout refuses law chunks past 16 bits"));
@@ -190,6 +202,8 @@ pub(super) fn read<'a>(
         above_grade_m3: above,
         in_place_m3,
         in_place_share: in_place_m3 / above,
+        carried_m3,
+        displacement_m: (carried_m3 > 0.0).then(|| moved_m4 / carried_m3),
         below_grade_chunks: below,
         opening_m2: opening,
         largest_piece: largest.map(|(chunks, _, speed_m_s)| LargestPiece { chunks, speed_m_s }),
@@ -208,12 +222,14 @@ pub(super) mod tests {
         Panel::met(&kind, [Vec3::new(-5.0, 1.0, 0.0)], Vec3::X).expect("the column faces the ray")
     }
 
-    /// HOW MUCH STANDS: the share counts volume built above grade by each chunk's own radius, and
-    /// the opening is the panel's face over chunks not in place, clipped at grade. The ram
-    /// investigation compares passes by them. A mutant counting the buried cube, keeping a
-    /// displaced cube in place or the face below grade reads otherwise.
+    /// HOW MUCH STANDS: a chunk is in place while every corner lies within the one limit of where
+    /// it was built; the share counts volume built above grade, the mean displacement weighs what a
+    /// body carries there by volume, and the opening is the panel's face over chunks not in place,
+    /// clipped at grade. The ram investigation compares passes by them. A mutant reading the
+    /// centroid keeps the turned cube in place; one counting the buried cube, keeping a displaced
+    /// cube in place or the face below grade reads otherwise.
     #[test]
-    fn a_chunk_stands_in_place_within_its_own_radius_above_grade() {
+    fn a_chunk_stands_in_place_within_one_limit_above_grade() {
         let kind = column_construction_from(-1.0);
         let panel = column_panel();
         assert_eq!(panel.face_m2, 2.0, "a 3 m column standing 1 m below grade");
@@ -227,20 +243,56 @@ pub(super) mod tests {
             born: 0,
             retired: None,
         };
-        // Fixture: the top cube lifted less, then more, than a unit cube's radius (0.87 m).
-        for (lift, displaced, in_place_m3, opening_m2) in
-            [(0.4, vec![], 2.0, 0.0), (1.0, vec![2], 1.0, 1.0)]
-        {
-            let frame = Transform::from_xyz(0.0, lift, 0.0);
+        // Fixture: a half-metre limit, and the top cube lifted within it, past it, and turned a
+        // radian about its centroid, which moves a corner 2·(√2/2)·sin(½) ≈ 0.68 m (DERIVED).
+        let mut turned = Transform::IDENTITY;
+        turned.rotate_around(
+            root.live.structure.chunks[2].centroid,
+            Quat::from_rotation_x(1.0),
+        );
+        let turn_m = 2.0 * std::f32::consts::FRAC_1_SQRT_2 * 0.5_f32.sin();
+        for (name, frame, moved, displaced, in_place_m3, opening_m2) in [
+            (
+                "lifted 0.4 m",
+                Transform::from_xyz(0.0, 0.4, 0.0),
+                0.4,
+                vec![],
+                2.0,
+                0.0,
+            ),
+            (
+                "lifted 1 m",
+                Transform::from_xyz(0.0, 1.0, 0.0),
+                1.0,
+                vec![2],
+                1.0,
+                1.0,
+            ),
+            ("turned 1 rad", turned, turn_m, vec![2], 1.0, 1.0),
+        ] {
             let pieces = [(&piece, &loose, frame, 3.0)].into_iter();
+            let reading = read(&panel, 0.5, (&root, Transform::IDENTITY), pieces);
+            // The column's standing cube is where it was built; the top cube moved `moved`.
+            let mean = reading
+                .displacement_m
+                .expect("a body carries the column above grade");
+            assert!(
+                (mean - moved / 2.0).abs() < 1e-5,
+                "{name}: mean displacement {mean} m"
+            );
             assert_eq!(
-                read(&panel, (&root, Transform::IDENTITY), pieces),
+                Reading {
+                    displacement_m: None,
+                    ..reading
+                },
                 Reading {
                     construction: 3,
                     displaced,
                     above_grade_m3: 2.0,
                     in_place_m3,
                     in_place_share: in_place_m3 / 2.0,
+                    carried_m3: 2.0,
+                    displacement_m: None,
                     below_grade_chunks: 1,
                     opening_m2,
                     largest_piece: Some(LargestPiece {
@@ -248,7 +300,7 @@ pub(super) mod tests {
                         speed_m_s: 3.0
                     }),
                 },
-                "top cube lifted {lift} m"
+                "{name}"
             );
         }
     }

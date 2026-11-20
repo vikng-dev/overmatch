@@ -18,7 +18,7 @@ use super::harness::{LeverError, env_text};
 use crate::{
     command::ParsedTankCommand,
     construction::{
-        Body,
+        Body, ConstructionKind,
         breakage::{Breakage, GRADE_M, Piece, SweepAccount},
     },
     contact_transfer::ContactTransfers,
@@ -27,7 +27,8 @@ use crate::{
         stages::{self, NamedCounts, NamedTimes},
     },
     debris::DebrisPiece,
-    map::{MapManifest, Prototype},
+    map::{InstanceRecord, MapManifest, Prototype},
+    provenance::{Labelled, Provenance, with_shipped_policy},
     scatter::MapInstance,
     spec::TankSpec,
     tank::{Tank, TankTemplate},
@@ -52,6 +53,8 @@ pub(super) struct Recipe {
     approach_s: f64,
     deadline_s: f64,
     settle_s: f64,
+    /// The structure reading's one in-place limit, m ([`structure`], IN PLACE): a `Unit`.
+    in_place_m: Labelled<f64>,
 }
 
 impl Recipe {
@@ -60,10 +63,11 @@ impl Recipe {
             LeverError::invalid(
                 LEVER,
                 text,
-                "JSON ram recipe: nonempty instance, finite heading_deg, runup_margin >= 1, minimum_speed_fraction in (0,1], positive approach_s/deadline_s/settle_s with settle_s < deadline_s",
+                "JSON ram recipe: nonempty instance, finite heading_deg, runup_margin >= 1, minimum_speed_fraction in (0,1], positive approach_s/deadline_s/settle_s with settle_s < deadline_s, in_place_m as [metres > 0, {\"Unit\": \"why this scale\"}]",
             )
         };
-        let recipe: Self = serde_json::from_str(text).map_err(|_| invalid())?;
+        let recipe: Self =
+            with_shipped_policy(|| serde_json::from_str(text)).map_err(|_| invalid())?;
         if recipe.instance.is_empty()
             || !recipe.heading_deg.is_finite()
             || !recipe.runup_margin.is_finite()
@@ -74,10 +78,40 @@ impl Recipe {
                 .iter()
                 .any(|v| !v.is_finite() || *v <= 0.0)
             || recipe.settle_s >= recipe.deadline_s
+            || !matches!(recipe.in_place_m.label, Provenance::Unit(_))
+            || !(recipe.in_place_m.value.is_finite() && recipe.in_place_m.value > 0.0)
         {
             return Err(invalid());
         }
         Ok(recipe)
+    }
+
+    /// The approach's rotation: it turns -Z onto the heading.
+    fn rotation(&self) -> Quat {
+        Quat::from_rotation_y(self.heading_deg.rem_euclid(360.0).to_radians() as f32)
+    }
+
+    /// The instance and its construction in `manifest`; refused when it names none there.
+    fn construction<'m>(
+        &self,
+        manifest: &'m MapManifest,
+    ) -> Result<(&'m InstanceRecord, &'m ConstructionKind), LeverError> {
+        let missing = || {
+            LeverError::invalid(
+                LEVER,
+                &self.instance,
+                "instance must name a construction in the active map",
+            )
+        };
+        let instance = (manifest.instances.iter())
+            .find(|i| i.id == self.instance)
+            .ok_or_else(missing)?;
+        let Prototype::Construction { asset } = &manifest.prototypes[&instance.prototype] else {
+            return Err(missing());
+        };
+        let kind = (manifest.constructions.get(asset))
+            .expect("map load resolved every construction its instances name");
+        Ok((instance, kind))
     }
 }
 
@@ -172,18 +206,6 @@ struct Channels {
     retired: f32,
 }
 
-impl std::ops::Add for Channels {
-    type Output = Self;
-    fn add(self, other: Self) -> Self {
-        Self {
-            standing: self.standing + other.standing,
-            piece: self.piece + other.piece,
-            other: self.other + other.other,
-            retired: self.retired + other.retired,
-        }
-    }
-}
-
 impl HullRow {
     /// The solver and the sweep keep every state finite; a reading that is not is a bug.
     fn assert_finite(&self, tick: u64) {
@@ -232,9 +254,10 @@ pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
     Ok(())
 }
 
-/// The recipe's construction instance, which a scripted client's frames approach
-/// (`dev_capture`'s approach anchor; `scripts/debris-lab` sets the lever on both processes).
-pub(super) fn target() -> Result<String, LeverError> {
+/// The construction instance a scripted client's frames approach (`dev_capture`'s approach
+/// anchor) and the approach's rotation, from the recipe `collapse.py --ram` sets on both
+/// processes; refused unless it names a construction in this client's own map.
+pub(super) fn target(manifest: &MapManifest) -> Result<(String, Quat), LeverError> {
     let text = env_text(LEVER)?.ok_or_else(|| {
         LeverError::invalid(
             LEVER,
@@ -242,7 +265,10 @@ pub(super) fn target() -> Result<String, LeverError> {
             "the ram recipe whose instance a scripted client's capture frames approach",
         )
     })?;
-    Ok(Recipe::parse(&text)?.instance)
+    let recipe = Recipe::parse(&text)?;
+    recipe.construction(manifest)?;
+    let heading = recipe.rotation();
+    Ok((recipe.instance, heading))
 }
 
 fn install_recipe(app: &mut App, recipe: Recipe) {
@@ -279,23 +305,9 @@ impl Recipe {
         height: Option<&HeightGrid>,
     ) -> Result<Plan, LeverError> {
         let invalid = |why| LeverError::invalid(LEVER, &self.instance, why);
-        let instance = manifest
-            .instances
-            .iter()
-            .find(|i| i.id == self.instance)
-            .ok_or_else(|| invalid("instance must name a construction in the active map"))?;
-        let Prototype::Construction { asset } = &manifest.prototypes[&instance.prototype] else {
-            return Err(invalid(
-                "instance must name a construction in the active map",
-            ));
-        };
-        let kind = manifest
-            .constructions
-            .get(asset)
-            .expect("map load resolved every construction its instances name");
+        let (instance, kind) = self.construction(manifest)?;
         let (runup_m, governed_m_s) = runup(spec, self.runup_margin as f32);
-        let rotation =
-            Quat::from_rotation_y(self.heading_deg.rem_euclid(360.0).to_radians() as f32);
+        let rotation = self.rotation();
         let direction = rotation * Vec3::NEG_Z;
         let xz = instance.pose.xz() - direction.xz() * runup_m;
         let limit = super::spawn_map::spawn_limit(manifest.extent.half_extent());
@@ -427,31 +439,24 @@ impl Hull<'_, '_> {
             .expect("a simulated tank has a pose, a velocity, a parsed command and its belts");
         let forward = rotation.0 * Vec3::NEG_Z;
         let forward_m_s = velocity.0.dot(forward);
-        let groups: Vec<_> = self.contacts.solver_groups().collect();
-        let kinds = &self.kinds;
-        let solver_ns = groups
-            .par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
-                let mut channels = Channels::default();
-                for point in groups.iter().flat_map(|points| points.iter()) {
-                    let (body, into_hull) = if point.other == tank {
-                        (point.reference, point.impulse)
-                    } else if point.reference == tank {
-                        (point.other, -point.impulse)
-                    } else {
-                        continue; // This constraint moved no momentum into the hull.
-                    };
-                    let channel = match kinds.get(body) {
-                        Ok((true, _)) => &mut channels.standing,
-                        Ok((_, true)) => &mut channels.piece,
-                        Ok(_) => &mut channels.other,
-                        Err(_) => &mut channels.retired,
-                    };
-                    *channel += into_hull.dot(forward);
-                }
-                channels
-            })
-            .into_iter()
-            .fold(Channels::default(), std::ops::Add::add);
+        // Summed in the solver's order, which no worker count decides.
+        let mut solver_ns = Channels::default();
+        for point in self.contacts.solver_groups().flatten() {
+            let (body, into_hull) = if point.other == tank {
+                (point.reference, point.impulse)
+            } else if point.reference == tank {
+                (point.other, -point.impulse)
+            } else {
+                continue; // This constraint moved no momentum into the hull.
+            };
+            let channel = match self.kinds.get(body) {
+                Ok((true, _)) => &mut solver_ns.standing,
+                Ok((_, true)) => &mut solver_ns.piece,
+                Ok(_) => &mut solver_ns.other,
+                Err(_) => &mut solver_ns.retired,
+            };
+            *channel += into_hull.dot(forward);
+        }
         HullRow {
             position_m: position.0.to_array(),
             velocity_m_s: velocity.0.to_array(),
@@ -502,8 +507,6 @@ pub(super) struct Census<'w, 's> {
             &'static LinearVelocity,
         ),
     >,
-    contacts: Res<'w, ContactTransfers>,
-    sweep: Res<'w, SweepAccount>,
     avian: AvianDiagnostics<'w, 's>,
     capture: ResMut<'w, StepSnapshot>,
 }
@@ -647,11 +650,11 @@ impl Census<'_, '_> {
     }
 
     pub(super) fn contact_tick(&mut self) -> ContactTick {
-        super::contact_census::finish(&mut self.capture, &self.sweep)
+        super::contact_census::finish(&mut self.capture, &self.hull.sweep)
     }
 
     pub(super) fn contact_points(&self) -> usize {
-        self.contacts.groups().map(|points| points.len()).sum()
+        self.hull.contacts.groups().map(|points| points.len()).sum()
     }
 
     /// This tick's sample, recorded by the ram and the scheduled collapse alike.
@@ -679,8 +682,8 @@ impl Census<'_, '_> {
                 .chain(&phases.cpu_times().values)
                 .sum(),
             detail: NamedTimes::new(&stages::DETAIL_NAMES, [0.0; stages::DETAIL_COUNT]),
-            sweep_sources: self.sweep.sources,
-            sweep_casts: self.sweep.work.casts,
+            sweep_sources: self.hull.sweep.sources,
+            sweep_casts: self.hull.sweep.work.casts,
             awake: self.pieces.iter().len(),
             tanks: self.hull.tanks.iter().len(),
             dt_s: dt,
@@ -746,7 +749,7 @@ impl Census<'_, '_> {
                 .expect("the target was checked this tick")
                 .2
                 .construction;
-            let groups: Vec<_> = self.contacts.groups().collect();
+            let groups: Vec<_> = self.hull.contacts.groups().collect();
             let solver = groups
                 .par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
                     groups
@@ -758,9 +761,7 @@ impl Census<'_, '_> {
                 })
                 .into_iter()
                 .flatten();
-            let swept = self
-                .sweep
-                .contacts
+            let swept = (self.hull.sweep.contacts)
                 .iter()
                 .filter(|((body, construction), _)| *construction == ordinal && *body == tank)
                 .map(|(_, &speed)| speed);
@@ -801,7 +802,13 @@ impl Census<'_, '_> {
                     (piece, breakage, frame, velocity.0.length())
                 });
             let built = root.physics_frame((position, rotation));
-            ram.structure = Some(structure::read(&plan.panel, (root, built), pieces));
+            let in_place_m = ram.recipe.in_place_m.value as f32;
+            ram.structure = Some(structure::read(
+                &plan.panel,
+                in_place_m,
+                (root, built),
+                pieces,
+            ));
         }
         Some(&mut row.collector_us)
     }
@@ -862,7 +869,8 @@ mod avian_tests;
 mod tests {
     use super::*;
 
-    /// Operator typos must refuse the run, rather than produce a different workload.
+    /// Operator typos must refuse the run, rather than produce a different workload or reading;
+    /// the in-place limit is a labelled `Unit`, never a bare number or another job.
     #[test]
     fn recipes_reject_unknown_fields_and_invalid_domains() {
         let text = include_str!("../../scripts/perf/ram.json");
@@ -885,6 +893,9 @@ mod tests {
             ("approach_s", json!("60")),
             ("drive_s", json!(18)),
             ("typo", json!(1)),
+            ("in_place_m", json!(0.1)),
+            ("in_place_m", json!([0.0, {"Unit": "a scale"}])),
+            ("in_place_m", json!([0.1, {"Taste": "a look"}])),
         ] {
             let mut changed = value.clone();
             changed[field] = bad;
@@ -1382,7 +1393,9 @@ mod tests {
         unattributed: Vec3,
     }
 
-    /// The ram row after this tick, read as the census reads it, and the hull's forward.
+    /// `Hull::row` over this tick's step, and the hull's forward: the channels' attribution only.
+    /// The shipped census reads the same row after the tick closes (`record_tick`), which this
+    /// does not mount; with no last row, `forward_change_m_s` is unread here.
     fn ram_row(app: &mut App, tank: Entity) -> (HullRow, Vec3) {
         use bevy::ecs::system::RunSystemOnce;
         let row = (app.world_mut())

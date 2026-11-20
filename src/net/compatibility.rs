@@ -113,21 +113,12 @@ impl Compatibility {
     }
 
     /// The provenance line each binary logs once at startup: this build's record and the cargo
-    /// features and assertions it was compiled with (`scripts/debris-lab` reads it).
+    /// features (`build.rs`) and assertions it was compiled with (`scripts/debris-lab` reads it).
     pub(super) fn build_line() -> String {
-        // Every feature of Cargo.toml's [features].
-        let features = [
-            ("audio", cfg!(feature = "audio")),
-            ("bitprobe", cfg!(feature = "bitprobe")),
-            ("dev_ui", cfg!(feature = "dev_ui")),
-        ]
-        .into_iter()
-        .filter_map(|(name, on)| on.then_some(name))
-        .collect::<Vec<_>>();
         format!(
             "build: {} features={} debug_assertions={}",
             Self::local().text(),
-            features.join(","),
+            env!("OVERMATCH_FEATURES"),
             cfg!(debug_assertions)
         )
     }

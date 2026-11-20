@@ -459,7 +459,7 @@ class RamTests(unittest.TestCase):
         ram = dict(recipe=recipe, plan=dict(minimum_m_s=9, governed_m_s=10, runup_m=20, clear_m=10,
                                            spawn=[0, 0, 0], rotation=[0, 0, 0, 1]),
                    impact=dict(tick=2, speed_m_s=10, normal_speed_m_s=10), done="deadline", ticks=ticks,
-                   structure=dict(above_grade_m3=2, in_place_m3=1, in_place_share=0.5, opening_m2=1),
+                   structure=dict(above_grade_m3=2, in_place_m3=1, in_place_share=0.5, carried_m3=1.5, displacement_m=0.4, opening_m2=1),
                    sends=[dict(tick=1, us=1000), dict(tick=3, us=40)], pieces=EMPTY_PIECES)
         return recipe, ram
 

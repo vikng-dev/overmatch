@@ -204,10 +204,10 @@ pub(crate) struct Frames {
     #[serde(default)]
     pub(crate) camera: Camera,
     /// Under a scripted client's approach anchor ([`super::Anchor::Approach`]), and only there:
-    /// the distance from the construction's bounds at which the controlled tank's root opens the
-    /// frames' timeline, finite and positive, metres.
+    /// how long before the controlled tank's root, at its replicated speed, would reach the
+    /// construction's bounds the first frame falls, finite and positive, seconds.
     #[serde(default)]
-    pub(crate) lead_m: Option<f32>,
+    pub(crate) lead_s: Option<f32>,
 }
 
 /// Who places the player's camera. One enum, so a pose and a follow cannot both be asked for.
@@ -229,7 +229,9 @@ pub(crate) enum Camera {
         eye: (f32, f32, f32),
         look: (f32, f32, f32),
     },
-    /// Held at this world-space offset from the controlled tank, looking at its root.
+    /// Held at this offset from the controlled tank, looking at its root: world metres, or under a
+    /// scripted client's approach ([`super::Anchor::Approach`]) metres in the approach's frame
+    /// (x right, y up, z behind).
     Follow { offset: (f32, f32, f32) },
 }
 
@@ -708,10 +710,10 @@ impl CapturePlan {
             if frames.at.is_empty() {
                 return Err("frames.at: no frame time".into());
             }
-            if let Some(lead) = frames.lead_m
+            if let Some(lead) = frames.lead_s
                 && !(lead.is_finite() && lead > 0.0)
             {
-                return Err(format!("frames.lead_m: {lead} is not finite and positive"));
+                return Err(format!("frames.lead_s: {lead} is not finite and positive"));
             }
             for &at in &frames.at {
                 finite_at("frames.at", at)?;

@@ -520,13 +520,13 @@ pub fn run() -> AppExit {
         app.add_plugins(NetClientPlugin);
     }
     if !headless {
-        // Frames to disk: documentation (the Join menu, a connect screen) counted from startup,
-        // or a scripted ram client's clip counted from its tank's approach. Inert unless a
-        // capture plan takes frames.
+        // Frames to disk, inert unless a capture plan takes frames: a scripted client's anchored
+        // on its approach (`Anchor::Approach`), any other's on startup.
         let anchor = if simulate && crate::dev_capture::plan().is_some() {
-            crate::dev_capture::Anchor::Approach(
-                super::ram::target().unwrap_or_else(harness::refuse_start),
-            )
+            let manifest = app.world().resource::<crate::map::MapManifest>();
+            let (instance, heading) =
+                super::ram::target(manifest).unwrap_or_else(harness::refuse_start);
+            crate::dev_capture::Anchor::Approach { instance, heading }
         } else {
             crate::dev_capture::Anchor::Startup
         };

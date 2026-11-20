@@ -66,7 +66,7 @@ use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy::ui::IsDefaultUiCamera;
 
-use avian3d::prelude::{Position, Rotation};
+use avian3d::prelude::{LinearVelocity, Position, Rotation};
 
 use crate::construction::{Body, breakage::Breakage};
 use crate::scatter::MapInstance;
@@ -109,12 +109,12 @@ struct Capture {
 #[derive(Resource)]
 struct FrameEpoch(Option<f32>);
 
-/// The construction instance whose approach opens the frames, and the lead in metres
-/// ([`Anchor::Approach`], `frames.lead_m`).
+/// The approach that opens the frames ([`Anchor::Approach`]) and the plan's `frames.lead_s`.
 #[derive(Resource)]
 struct Approach {
     instance: String,
-    lead_m: f32,
+    heading: Quat,
+    lead_s: f32,
 }
 
 /// The capture of the plan's `frames` (module doc) and its `keys`; each is inert where the plan
@@ -137,7 +137,7 @@ pub(crate) fn build_plan(
 ) -> Result<(), plan::PlanError> {
     let frames = plan.frames.as_ref();
     if frames.is_some_and(|frames| matches!(frames.camera, plan::Camera::Follow { .. }))
-        && !matches!(anchor, Anchor::Scenario | Anchor::Approach(_))
+        && !matches!(anchor, Anchor::Scenario | Anchor::Approach { .. })
     {
         return Err(plan::PlanError::FollowWithoutTank(anchor));
     }
@@ -148,26 +148,27 @@ pub(crate) fn build_plan(
             why,
         })
     };
-    let approach = match (&anchor, frames.and_then(|frames| frames.lead_m)) {
-        (Anchor::Approach(_), _) if !plan.keys.is_empty() => {
+    let approach = match (&anchor, frames.and_then(|frames| frames.lead_s)) {
+        (Anchor::Approach { .. }, _) if !plan.keys.is_empty() => {
             return refuse(
                 "keys",
                 "a harness script owns this client's input; hold no keys",
             );
         }
-        (Anchor::Approach(instance), Some(lead_m)) => Some(Approach {
+        (Anchor::Approach { instance, heading }, Some(lead_s)) => Some(Approach {
             instance: instance.clone(),
-            lead_m,
+            heading: *heading,
+            lead_s,
         }),
-        (Anchor::Approach(_), None) => {
+        (Anchor::Approach { .. }, None) => {
             return refuse(
-                "frames.lead_m",
-                "a scripted client's frames open on its tank's approach; give the lead in metres",
+                "frames.lead_s",
+                "a scripted client's frames open on its tank's approach; give the lead in seconds",
             );
         }
         (_, Some(_)) => {
             return refuse(
-                "frames.lead_m",
+                "frames.lead_s",
                 "only a scripted client's approach reads it",
             );
         }
@@ -175,7 +176,7 @@ pub(crate) fn build_plan(
     };
     // Frames choose their update strategy before the clock suspends it.
     if let Some(frames) = frames {
-        mount(app, frames, approach.is_none());
+        mount(app, frames, approach.as_ref());
     }
     if let Some(approach) = approach {
         app.insert_resource(approach)
@@ -187,31 +188,37 @@ pub(crate) fn build_plan(
     Ok(())
 }
 
-/// Open the frames' timeline the first frame the controlled tank's root, as presented, comes
-/// within the lead of the instance's bounds. No controlled tank before spawn is a legitimate wait.
+/// Open the frames' timeline the first frame the controlled tank's root, as presented and at its
+/// replicated speed, would reach the instance's bounds within the warm-up and the lead, so the
+/// first frame falls the lead before it does. Before spawn there is no controlled tank, nor its
+/// replicated velocity: a legitimate wait.
 fn open_on_approach(
     time: Res<Time>,
     approach: Res<Approach>,
     mut epoch: ResMut<FrameEpoch>,
-    tanks: Query<&Transform, With<crate::tank::Controlled>>,
+    tanks: Query<(&Transform, &LinearVelocity), With<crate::tank::Controlled>>,
     constructions: Query<(&MapInstance, &Breakage, &Position, &Rotation), With<Body>>,
 ) {
     if epoch.0.is_some() {
         return;
     }
-    let Some(tank) = crate::tank::controlled_one(tanks.single()) else {
+    let Some((tank, velocity)) = crate::tank::controlled_one(tanks.single()) else {
         return;
     };
     let (_, breakage, position, rotation) = (constructions.iter())
         .find(|(instance, ..)| instance.id == approach.instance)
-        .expect("the server admitted the ram recipe's instance from the map this client loaded");
+        .expect(
+            "this client admitted the approach's instance against its own map, whose world \
+             spawns every instance at startup",
+        );
     let frame = breakage.physics_frame((position, rotation));
     let local = frame.rotation.inverse() * (tank.translation - frame.translation);
     let (min, max) = breakage.kind.bounds();
-    if local.clamp(min, max).distance(local) <= approach.lead_m {
+    let gap_m = local.clamp(min, max).distance(local);
+    let speed = velocity.0.length();
+    if gap_m <= (WARM_UP + approach.lead_s) * speed {
         info!(
-            "capture: approach within {} m of {} at {} s",
-            approach.lead_m,
+            "capture: approach {gap_m} m from {} at {speed} m/s, {} s",
             approach.instance,
             time.elapsed_secs()
         );
@@ -307,7 +314,9 @@ fn prepare_output(path: &Path) -> Result<(), plan::PlanError> {
     Ok(())
 }
 
-fn mount(app: &mut App, frames: &plan::Frames, ends_run: bool) {
+/// `approach`, a scripted client's, poses a follow camera's offset and leaves the run's end to
+/// its script.
+fn mount(app: &mut App, frames: &plan::Frames, approach: Option<&Approach>) {
     let size = frames.size();
     info!(
         "capture: {} at {:?} s, sight {}, {}x{}, ui {}, gizmos {}",
@@ -371,7 +380,8 @@ fn mount(app: &mut App, frames: &plan::Frames, ends_run: bool) {
             );
         }
         plan::Camera::Follow { offset } => {
-            let offset = Vec3::from(offset);
+            let offset =
+                approach.map_or(Quat::IDENTITY, |approach| approach.heading) * Vec3::from(offset);
             app.add_systems(
                 PostUpdate,
                 (move |tanks: Query<&Transform, With<crate::tank::Controlled>>,
@@ -410,7 +420,7 @@ fn mount(app: &mut App, frames: &plan::Frames, ends_run: bool) {
         switched: false,
         requested: 0,
         saved: 0,
-        ends_run,
+        ends_run: approach.is_none(),
     });
     app.add_systems(Update, capture.in_set(clock::Cues));
     if !frames.ui {
@@ -932,23 +942,30 @@ mod tests {
     }
 
     /// APPROACH: a scripted client's frames count from its tank's approach to the named
-    /// construction, never from startup; `scripts/debris-lab` pairs two runs' clips by that event.
-    /// A mutant timing them from startup frames before the tank is near, or all at once.
+    /// construction, never from startup: the first falls the plan's lead before the tank, at its
+    /// speed, would reach the construction. `scripts/debris-lab` pairs two runs' clips by that
+    /// event. A mutant timing them from startup frames before the tank is near; one ignoring the
+    /// speed opens them on the slow pass, 10 m out, or not on the fast one; one firing them all at
+    /// once breaks the spacing.
     #[test]
     fn approach_frames_count_from_the_tanks_approach() {
         let path = std::env::temp_dir().join(format!(
             "overmatch-approach-fixture-{}.png",
             std::process::id()
         ));
-        // Fixture: two frames half a second apart, opened 5 m from the column's bounds.
-        let fixture = plan::CapturePlan::parse(&format!(r#"(frames: (out: {path:?}, at: [2.0, 2.5], lead_m: 5.0, camera: Follow(offset: (0.0, 5.0, 10.0))))"#)).unwrap();
+        // Fixture: two frames half a second apart, the first half a second before the column.
+        let fixture = plan::CapturePlan::parse(&format!(r#"(frames: (out: {path:?}, at: [2.0, 2.5], lead_s: 0.5, camera: Follow(offset: (0.0, 5.0, 10.0))))"#)).unwrap();
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<Assets<Image>>()
             .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
                 std::time::Duration::from_millis(250),
             ));
-        build_plan(&mut app, Anchor::Approach("column".into()), &fixture).unwrap();
+        let anchor = Anchor::Approach {
+            instance: "column".into(),
+            heading: Quat::IDENTITY,
+        };
+        build_plan(&mut app, anchor, &fixture).unwrap();
         app.world_mut().spawn((
             MapInstance {
                 id: "column".into(),
@@ -959,21 +976,23 @@ mod tests {
             Rotation::default(),
             Body,
         ));
+        // Fixture: 10 m from the column's bounds, closing at 1 m/s, then at 10 m/s.
         let tank = (app.world_mut())
-            .spawn((crate::tank::Controlled, Transform::from_xyz(0.0, 1.0, 20.0)))
+            .spawn((
+                crate::tank::Controlled,
+                Transform::from_xyz(0.0, 1.0, 10.5),
+                LinearVelocity(Vec3::NEG_Z),
+            ))
             .id();
         for _ in 0..12 {
             app.update();
-            let target = &app.world().resource::<Capture>().target;
-            assert!(target.is_none(), "frames wait for the approach");
+            let requested = app.world().resource::<Capture>().requested;
+            assert_eq!(requested, 0, "frames wait for the approach");
         }
-        app.world_mut()
-            .get_mut::<Transform>(tank)
-            .unwrap()
-            .translation
-            .z = 5.0;
+        app.world_mut().get_mut::<LinearVelocity>(tank).unwrap().0 = Vec3::NEG_Z * 10.0;
         app.update();
-        let opened = (app.world().resource::<FrameEpoch>().0).expect("the tank came within 5 m");
+        let opened =
+            (app.world().resource::<FrameEpoch>().0).expect("at 10 m/s the tank is 1 s away");
         loop {
             app.update();
             let since = app.world().resource::<Time>().elapsed_secs() - opened;
@@ -999,12 +1018,15 @@ mod tests {
             ))
             .unwrap()
         };
-        let (lead, keys) = (", lead_m: 5.0", ", keys: [(key: KeyW, from: 0.0, to: 1.0)]");
-        let approach = || Anchor::Approach("column".into());
+        let (lead, keys) = (", lead_s: 0.5", ", keys: [(key: KeyW, from: 0.0, to: 1.0)]");
+        let approach = || Anchor::Approach {
+            instance: "column".into(),
+            heading: Quat::IDENTITY,
+        };
         for (anchor, plan, field) in [
             (approach(), fixture(lead, keys), "keys"),
-            (approach(), fixture("", ""), "frames.lead_m"),
-            (Anchor::Startup, fixture(lead, ""), "frames.lead_m"),
+            (approach(), fixture("", ""), "frames.lead_s"),
+            (Anchor::Startup, fixture(lead, ""), "frames.lead_s"),
         ] {
             let mut app = App::new();
             let error = build_plan(&mut app, anchor, &plan).unwrap_err();

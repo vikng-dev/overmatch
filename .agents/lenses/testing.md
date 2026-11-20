@@ -1,7 +1,7 @@
 # Lens: testing
 
-Subject: what the tests prove about the game's behaviour and how it is put together. Where they
-touch the damage model, game state only.
+Subject: what the tests, and the harnesses that measure the game, prove about its behaviour and how
+it is put together. Where they touch the damage model, game state only.
 
 Principle: `AGENTS.md`, "A test is written under scrutiny" and "Pin sourced facts". A test names the
 invariant a plausible mutant would break and who relies on it, and tolerates every permitted change

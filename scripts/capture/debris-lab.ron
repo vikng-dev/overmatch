@@ -21,10 +21,10 @@
         scale_factor: 1.0,
         ui: false,
         gizmos: false,
-        // Taste: clip framing, world metres from the tank's root: behind and to the right of a
-        // pass heading near -Z (scripts/perf/ram.json), high enough to see over the hull.
+        // Taste: clip framing, metres from the tank's root in the approach's frame: behind and to
+        // the right of the pass, high enough to see over the hull.
         camera: Follow(offset: (9.0, 6.0, 14.0)),
-        // Taste: the pass comes into view about a second before the hull meets the house.
-        lead_m: 25.0,
+        // Taste: the first frame shows the hull a second and a half short of the house.
+        lead_s: 1.5,
     ),
 )

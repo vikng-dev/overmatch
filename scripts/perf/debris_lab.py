@@ -12,14 +12,14 @@ Hosted cost is collapse.sh --ram without a clip (scripts/perf/collapse.md)."""
 import argparse
 import hashlib
 import json
-import math
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+from collapse import BIN, ROOT, percentile
+
 PLAN = ROOT / "scripts/capture/debris-lab.ron"
 FONT = ROOT / "assets/fonts/BarlowCondensed-SemiBold.ttf"
 TOOLS = ("ffmpeg", "ffprobe", "magick")
@@ -66,7 +66,7 @@ def provenance(out, result):
     return dict(
         revision=run_text(["git", "rev-parse", "HEAD"], cwd=ROOT).strip(),
         tracked_diff_sha256=hashlib.sha256(run_text(["git", "diff", "HEAD", "--binary"], cwd=ROOT).encode()).hexdigest(),
-        binaries={name: sha256(ROOT / "target/debug" / name) for name in ("overmatch-server", "overmatch")},
+        binaries={name: sha256(BIN / name) for name in ("overmatch-server", "overmatch")},
         build=builds["server"],
         recipe=result["recipe"],
         plan_sha256=sha256(PLAN),
@@ -91,17 +91,15 @@ def rate(frames):
     return 1 / gaps.pop()
 
 
-def label(out, name, revision):
+def label(out, frames, recipe, name, revision):
     """Burn the run's name, revision, frame time and the timing caveat into each frame."""
-    recipe = json.loads((out / "result.json").read_text())["recipe"]
     labelled = out / "labelled"
     labelled.mkdir()
-    frames = frames_of(out)
     for frame, at in frames:
         text = (f"{name}  {revision[:10]}  {recipe['instance']} heading {recipe['heading_deg']} deg  "
-                f"t {at - frames[0][1]:.3f} s  tick cost: comparison only")
+                f"t {at - frames[0][1]:.3f} s  tick cost: {TIMING}")
         subprocess.run(["magick", str(frame), "-font", str(FONT), "-gravity", "north", "-fill", "white",
-                        "-undercolor", "#000000a0", "-pointsize", "28", "-annotate", "+0+12", text,
+                        "-undercolor", "#000000a0", "-pointsize", "24", "-annotate", "+0+12", text,
                         str(labelled / frame.name)], check=True)
     return labelled
 
@@ -134,48 +132,72 @@ def run(args):
     record = provenance(out, result)
     clip = out / "clip.mp4"
     frames = frames_of(out)
-    encode(label(out, out.name, record["revision"]), rate(frames), clip)
+    encode(label(out, frames, result["recipe"], out.name, record["revision"]), rate(frames), clip)
     record["clip"] = layout(clip)
     if record["clip"]["frames"] != len(frames):
         refuse(f"{clip} holds {record['clip']['frames']} frames of {len(frames)}")
     (out / "run.json").write_text(json.dumps(record, indent=2) + "\n")
     structure = result["structure"]
     print(f"debris-lab: {out.name}: {result['end']} after {result['window_s']:.3f} s; in place "
-          f"{structure['in_place_share']:.3f}, opening {structure['opening_m2']:.2f} m2, "
-          f"{len(structure['displaced'])} chunks displaced; clip {clip}")
+          f"{structure['in_place_share']:.3f}, mean displacement {structure['displacement_m']} m, opening "
+          f"{structure['opening_m2']:.2f} m2, {len(structure['displaced'])} chunks displaced; clip {clip}")
 
 
-def first_difference(a, b, keys):
-    """The first tick at which `keys` of the hull rows differ, and the field; None when equal."""
-    rows_a, rows_b = ({t["tick"]: t["hull"] for t in r["ticks"]} for r in (a, b))
-    for tick in sorted(rows_a.keys() | rows_b.keys()):
-        if tick not in rows_a or tick not in rows_b:
-            return tick, "tick"
-        for key in keys(rows_a[tick]):
-            if rows_a[tick][key] != rows_b[tick][key]:
-                return tick, f"hull.{key}"
+def onset(result, run):
+    """The capture tick from which the server parsed a nonzero drive: where the run's input begins."""
+    tick = next((t["tick"] for t in result["ticks"] if any(t["hull"]["drive"])), None)
+    if tick is None:
+        refuse(f"{run} never drove; a ram run holds its throttle")
+    if tick == result["ticks"][0]["tick"]:
+        refuse(f"{run} drove from its first captured tick; no rest precedes its input")
+    return tick
+
+
+def first_difference(pairs, keys):
+    """The first `(key, field)` at which the paired hull rows differ in `keys`; None when equal."""
+    for key, (a, b) in pairs:
+        for field in keys(a):
+            if a[field] != b[field]:
+                return key, f"hull.{field}"
     return None
 
 
 def verdict(a, b):
-    """Inputs first, then state, keyed by capture tick and field and, at the capture's end, by
-    construction and chunk, never by entity: equal; inputs differ at tick N (outside input, not a
-    replay); or state differs at tick M, field F (an order dependence on the server)."""
-    inputs = first_difference(a, b, lambda row: ["drive"])
+    """Two runs keyed from their input onsets (the first tick each server parsed a nonzero drive),
+    and at the capture's end by construction and chunk, never by entity. Over UDP each run's input
+    arrives on its own tick; the keying holds while the hull rests before it: the rows agree tick
+    for tick from spawn, and the later run held the earlier one's last row until its own onset.
+    Otherwise the state differs before input. After the onset, over the ticks both runs hold,
+    inputs first, then state: equal; inputs differ (outside input, not a replay); or state differs,
+    where the same inputs gave different state, at a field or at an unequal end (`last_tick`)."""
+    onsets = [onset(a, "a"), onset(b, "b")]
+    rows = [{t["tick"]: t["hull"] for t in r["ticks"]} for r in (a, b)]
+    found = dict(onsets=onsets)
+    resting = ((tick, [r[min(tick, o - 1)] for r, o in zip(rows, onsets)])
+               for tick in range(min(rows[0]), max(onsets)))
+    before = first_difference(resting, lambda row: sorted(row))
+    if before:
+        return dict(verdict="state differs before input", tick=before[0], field=before[1], **found)
+    after = [{t - o: hull for t, hull in r.items() if t >= o} for r, o in zip(rows, onsets)]
+    shared = [(k, (after[0][k], after[1][k])) for k in sorted(after[0].keys() & after[1].keys())]
+    inputs = first_difference(shared, lambda row: ["drive"])
     if inputs:
-        return dict(verdict="inputs differ", tick=inputs[0])
-    state = first_difference(a, b, lambda row: sorted(k for k in row if k != "drive"))
+        return dict(verdict="inputs differ", after_onset=inputs[0], **found)
+    state = first_difference(shared, lambda row: sorted(k for k in row if k != "drive"))
     if state:
-        return dict(verdict="state differs", tick=state[0], field=state[1])
-    end = min(a["last_tick"], b["last_tick"])
+        return dict(verdict="state differs", after_onset=state[0], field=state[1], **found)
+    ends = [r["last_tick"] - o for r, o in zip((a, b), onsets)]
+    if ends[0] != ends[1]:
+        return dict(verdict="state differs", after_onset=min(ends), field="last_tick", **found)
     displaced = [set(r["structure"]["displaced"]) for r in (a, b)]
     if displaced[0] != displaced[1]:
         construction, chunk = a["structure"]["construction"], min(displaced[0] ^ displaced[1])
-        return dict(verdict="state differs", tick=end, field=f"construction {construction} chunk {chunk}")
+        return dict(verdict="state differs", after_onset=ends[0],
+                    field=f"construction {construction} chunk {chunk}", **found)
     for key in sorted(a["structure"].keys() | b["structure"].keys()):
         if a["structure"].get(key) != b["structure"].get(key):
-            return dict(verdict="state differs", tick=end, field=f"structure.{key}")
-    return dict(verdict="equal")
+            return dict(verdict="state differs", after_onset=ends[0], field=f"structure.{key}", **found)
+    return dict(verdict="equal", **found)
 
 
 def admit(records):
@@ -186,10 +208,10 @@ def admit(records):
 
 
 def timing(result):
+    """The contact window's tick times; p99 and the worst are result.json's own."""
     window = sorted(t["tick_us"] for t in result["ticks"] if t["tick"] >= result["first_tick"])
-    pick = lambda q: window[min(len(window) - 1, math.ceil(q*len(window)) - 1)]
-    return dict(mean_us=sum(window)/len(window), p50_us=pick(0.5), p95_us=pick(0.95), p99_us=pick(0.99),
-                max_us=window[-1])
+    return dict(mean_us=result["tick_mean_us"], p50_us=percentile(window, 0.5),
+                p95_us=percentile(window, 0.95), p99_us=result["p99_us"], max_us=result["worst_tick"]["tick_us"])
 
 
 def compare(args):
