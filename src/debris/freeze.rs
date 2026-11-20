@@ -32,11 +32,11 @@
 //! `wake_on_enable_rigid_body`), so the island rests a full `TimeToSleep` again before it can sleep
 //! and freeze. Four causes:
 //! - reach: a mover (an awake body that is not static, and each piece this thaw frees) with a
-//!   collider that could make a contact with a frozen piece in this step. Avian makes contacts
-//!   once per step, in the narrow phase, from the poses and linear velocities the step starts
-//!   with, between colliders closer than `max(dt |Δv|, contact tolerance)` plus their collision
-//!   margins (`collision/narrow_phase/system_param.rs`, `update_contacts`). A frozen piece's
-//!   bounds hold its shape grown by the tolerance and its collider's margin
+//!   collider with mutual layer permission that could contact a frozen piece in this step. Avian
+//!   makes contacts once per step, in the narrow phase, from the poses and linear velocities the
+//!   step starts with, between colliders closer than `max(dt |Δv|, contact tolerance)` plus their
+//!   collision margins (`collision/narrow_phase/system_param.rs`, `update_contacts`). A frozen
+//!   piece's bounds hold its shape grown by the tolerance and its collider's margin
 //!   (`collider_tree/update.rs`, `update_moved_collider_aabbs`; no piece carries a body margin,
 //!   which those bounds would leave out), so a mover collider's shape bounds at its pose, grown by
 //!   `dt |v|` and its margin, meet every frozen collider it could touch. Rotation and acceleration
@@ -71,12 +71,12 @@
 //! runs of the same match.
 //!
 //! COST, OPEN. The reach casts at most one spatial query per body it evaluates, and exactly one
-//! when the body has a solid collider (`Reach::of`); it evaluates each awake body that is not
-//! static, and each piece the thaw frees. The freeze and the thaw evaluate it on the compute pool
-//! (`Reach::of_each`), the thaw's cascade one wave of freed islands at a time; the freeze also
-//! gathers the sleeping pieces and classifies each candidate island's support there, every
-//! candidate's, while its budget bounds only the switches. What those dispatches cost on the hosted
-//! allocation is unmeasured.
+//! when the body has a solid collider with nonempty masks (`Reach::of`); it evaluates each awake
+//! body that is not static, and each piece the thaw frees. The freeze and the thaw evaluate it on
+//! the compute pool (`Reach::of_each`), the thaw's cascade one wave of freed islands at a time;
+//! the freeze also gathers the sleeping pieces and classifies each candidate island's support
+//! there, every candidate's, while its budget bounds only the switches. What those dispatches cost
+//! on the hosted allocation is unmeasured.
 //! With server stats armed, [`census`] gives an upper bound on freezable awake pieces outside the
 //! tick, evaluating reach in parallel. With no server stats recorder, that census fetches nothing
 //! and casts no query.
@@ -390,7 +390,7 @@ struct Reach<'w, 's> {
             Option<&'static CollisionMargin>,
         ),
     >,
-    /// The colliders that make contacts, at their placed poses.
+    /// Colliders at their placed poses (`Collider` requires `CollisionLayers`).
     solids: Query<
         'w,
         's,
@@ -399,6 +399,7 @@ struct Reach<'w, 's> {
             &'static Position,
             &'static Rotation,
             Option<&'static CollisionMargin>,
+            &'static CollisionLayers,
         ),
         (Without<Sensor>, Without<ColliderDisabled>),
     >,
@@ -489,24 +490,32 @@ impl Reach<'_, '_> {
         let travel = linear.length() * self.time.delta_secs();
         let mut boxes = Vec::new();
         for collider in colliders.iter() {
-            let Ok((shape, at, turn, margin)) = self.solids.get(collider) else {
+            let Ok((shape, at, turn, margin, layers)) = self.solids.get(collider) else {
                 continue; // A sensor or a disabled collider makes no contact.
             };
+            if layers.memberships == LayerMask::NONE || layers.filters == LayerMask::NONE {
+                continue; // An empty mask interacts with no partner.
+            }
             let margin = margin.or(body_margin).map_or(0.0, |margin| margin.0);
-            boxes.push(
+            boxes.push((
                 shape
                     .aabb(at.0, *turn, 0.0)
                     .grow(Vec3::splat(travel + margin)),
-            );
+                *layers,
+            ));
         }
-        let Some(union) = boxes.iter().copied().reduce(ColliderAabb::merged) else {
-            return; // A body with no solid collider touches nothing.
+        let Some(union) = boxes
+            .iter()
+            .map(|(bounds, _)| *bounds)
+            .reduce(ColliderAabb::merged)
+        else {
+            return; // A body with no contactable collider touches nothing.
         };
         tally.queries += 1;
         let mut found = false;
         self.spatial
             .aabb_intersections_with_aabb_callback(union, |hit| {
-                if self.solids.contains(hit)
+                if let Ok((_, _, _, _, layers)) = self.solids.get(hit)
                     && let Ok(of) = self.collider_of.get(hit)
                     && keep(of.body)
                 {
@@ -514,7 +523,9 @@ impl Reach<'_, '_> {
                         .aabbs
                         .get(hit)
                         .expect("Avian's AABB query reports only colliders with bounds");
-                    if boxes.iter().any(|b| bounds.intersects(b)) {
+                    if boxes.iter().any(|(bounds_of_source, source_layers)| {
+                        source_layers.interacts_with(*layers) && bounds.intersects(bounds_of_source)
+                    }) {
                         found = true;
                         reached.insert(of.body);
                     }
@@ -982,17 +993,28 @@ mod tests {
             .collect()
     }
 
-    /// A hovering 0.6 × 0.4 × 0.6 m body at `at`, sliding along +x at `speed` (fixture data).
+    /// [`mover`]'s width and depth, m (fixture data).
+    const MOVER_WIDTH: f32 = 0.6;
+
+    /// A hovering box body [`MOVER_WIDTH`] wide and deep and 0.4 m tall at `at`, sliding along +x
+    /// at `speed` (fixture data).
     fn mover(app: &mut App, at: Vec3, speed: f32) -> EntityWorldMut<'_> {
         app.world_mut().spawn((
             Position(at),
             Rotation::default(),
             RigidBody::Dynamic,
             GravityScale(0.0),
-            Collider::cuboid(0.6, 0.4, 0.6),
+            Collider::cuboid(MOVER_WIDTH, 0.4, MOVER_WIDTH),
             ColliderDensity(1000.0),
             LinearVelocity(Vec3::X * speed),
         ))
+    }
+
+    /// A [`mover`] `gap` m to −x of a piece centred on the y axis on a slab topped at 0, its
+    /// bottom 0.25 m over the slab (fixture data).
+    fn mover_beside(app: &mut App, gap: f32, speed: f32) -> EntityWorldMut<'_> {
+        let x = -(SIDE / 2.0 + gap + MOVER_WIDTH / 2.0);
+        mover(app, Vec3::new(x, 0.45, 0.0), speed)
     }
 
     /// For the #379 decision, partly rested debris must not reach, while a driven hull with
@@ -1025,6 +1047,7 @@ mod tests {
                 .insert((SleepingDisabled, CollisionLayers::NONE))
                 .id()
         };
+        let sources = [10.0, 20.0, 30.0, 90.0, 0.0, 0.0, 0.0].map(&mut source);
         let [
             zero,
             partial,
@@ -1033,13 +1056,17 @@ mod tests {
             resting,
             sleeping_source,
             static_source,
-        ] = [10.0, 20.0, 30.0, 90.0, 0.0, 0.0, 0.0].map(&mut source);
+        ] = sources;
         for debris in [zero, partial] {
             app.world_mut().entity_mut(debris).insert(DebrisPiece);
         }
         app.update();
         app.update();
         let world = app.world_mut();
+        // Admit contact after setup; the census reads masks without stepping the solver.
+        for body in sources {
+            world.entity_mut(body).insert(CollisionLayers::ALL);
+        }
         let rest_window = world.resource::<TimeToSleep>().0;
         let dt = world.resource::<Time<Fixed>>().timestep().as_secs_f32();
         assert!(
@@ -1290,6 +1317,57 @@ mod tests {
         );
     }
 
+    /// A FROZEN PIECE IGNORES A MOVER WHOSE LAYERS FORBID THEIR CONTACT: a reach that drops either
+    /// direction of the layer test, or pools a body's layers across its colliders, thaws it.
+    #[test]
+    fn a_mover_without_mutual_contact_permission_does_not_thaw_a_piece() {
+        for (case, source) in [
+            (
+                "source refuses target",
+                CollisionLayers::new([Layer::Vehicle], [Layer::Terrain]),
+            ),
+            (
+                "target refuses source",
+                CollisionLayers::new([Layer::TrackSide], LayerMask::ALL),
+            ),
+        ] {
+            // The cases rest on the shipped piece layers: the near collider is refused, and the
+            // permitting one would be admitted, so a pooled or one-way reach has something to find.
+            let target = crate::construction::breakage::piece_layers();
+            let permitting = CollisionLayers::new([Layer::Vehicle], LayerMask::ALL);
+            assert!(!source.interacts_with(target), "{case}: premise");
+            assert!(permitting.interacts_with(target), "{case}: premise");
+            let mut app = settling(GRAVITY);
+            slab(&mut app, 0.0);
+            let rubble = piece(&mut app, Vec3::Y * (SIDE / 2.0));
+            until_frozen(&mut app, &[rubble]);
+            // Fixture: the hovering box crosses the cube from a 3 cm gap at 4 m/s.
+            let body = mover_beside(&mut app, 0.03, 4.0).insert(source).id();
+            // Fixture: a permitting collider 2 m aside cannot lend its layers to the near one.
+            app.world_mut().spawn((
+                ChildOf(body),
+                Transform::from_xyz(0.0, 0.0, 2.0),
+                Collider::cuboid(SIDE, SIDE, SIDE),
+                permitting,
+            ));
+            // Fixture: enough fixed updates to cross the cube, including its far face.
+            for update in 0..16 {
+                app.update();
+                assert!(
+                    app.world()
+                        .resource::<ContactGraph>()
+                        .get(body, rubble)
+                        .is_none(),
+                    "{case}: the masks forbid a contact pair"
+                );
+                assert!(
+                    is_frozen(&app, rubble),
+                    "{case}, update {update}: a non-contacting mover must leave the piece frozen"
+                );
+            }
+        }
+    }
+
     /// A PIECE WITHIN REACH OF A MOVING BODY IS AWAKE BEFORE CONTACT: a hovering body at rest
     /// beside a piece frozen on the ground, a tank's stand-in (no piece) or a loose piece, pushed
     /// towards it slow or fast, finds it dynamic in every step that solves a contact between them
@@ -1312,8 +1390,7 @@ mod tests {
                 let rubble = piece(&mut app, Vec3::Y * (SIDE / 2.0));
                 until_frozen(&mut app, &[rubble]);
                 let start = app.world().get::<Position>(rubble).unwrap().0;
-                let at = Vec3::new(-(SIDE / 2.0 + gap + 0.3), 0.45, 0.0);
-                let mut body = mover(&mut app, at, 0.0);
+                let mut body = mover_beside(&mut app, gap, 0.0);
                 if mover_is_a_piece {
                     body.insert((
                         DebrisPiece,
@@ -1374,7 +1451,7 @@ mod tests {
     /// this static.
     #[test]
     fn a_spinning_or_accelerating_body_meets_no_frozen_piece() {
-        // Fixture: a 4 m bar at 15 rad/s, its end 30 m/s across the piece; a 0.6 m body at rest
+        // Fixture: a 4 m bar at 15 rad/s, its end 30 m/s across the piece; a [`mover`] at rest
         // 0.1 m off under 2000 m/s², which its first step carries into the piece with no contact.
         let cases: [(&str, fn(&mut App) -> Entity); 2] = [
             ("a spinning bar", |app| {
@@ -1392,7 +1469,7 @@ mod tests {
                     .id()
             }),
             ("an accelerating body", |app| {
-                let at = Vec3::new(1.9 - SIDE / 2.0 - 0.1 - 0.3, SIDE * 0.75, 0.0);
+                let at = Vec3::new(1.9 - SIDE / 2.0 - 0.1 - MOVER_WIDTH / 2.0, SIDE * 0.75, 0.0);
                 mover(app, at, 0.0)
                     .insert((
                         ConstantLinearAcceleration(Vec3::X * 2000.0),
