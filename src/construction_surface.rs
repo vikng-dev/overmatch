@@ -129,7 +129,7 @@ pub(crate) struct SurfaceParams {
     pub secondary: Vec4,
     /// The primary lane's visual's break records, then the secondary's
     /// ([`crate::construction::view::break_params`]).
-    pub breaks: [Vec4; 4],
+    pub breaks: [Vec4; 6],
 }
 
 /// The secondary half of [`ConstructionMaterial`]: the secondary palette lane pack's three maps and their scale. Bindings
@@ -260,7 +260,7 @@ pub(crate) fn material(
                     .map(|pack| crate::construction::view::break_params(&pack.visual))
                     .concat()
                     .try_into()
-                    .expect("two lanes of two records"),
+                    .expect("two lanes of three records"),
             },
             secondary_albedo,
             secondary_normal,

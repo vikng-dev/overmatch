@@ -19,10 +19,10 @@ import constants::MATERIAL_BIND_GROUP;
 //
 // A BREAK FACE IS CORE (`construction::view::relief`): lane `2 + lane` in UV1.x, its UV the
 // asset-frame position along the element's run and up, in metres, its vertex colour its substance's
-// exposed linear colour with the position across the element's depth in alpha. It draws that colour
-// with the lane visual's mortar where a bed, head or leaf joint plane crosses it (heads and leaves
-// staggered half a unit per course), under its drawn normal, unoccluded, at the lane pack's roughness
-// and metallic.
+// exposed linear colour with its depth from the element's face in alpha. It draws that colour with
+// the lane visual's mortar where a bed, head or leaf joint plane crosses it (heads and leaves
+// shifting the visual's stagger of a unit each course), none for a visual without units, under its
+// drawn normal, unoccluded, at the lane pack's roughness and metallic.
 //
 // HOLES ONLY WHERE THE MATERIAL MAY DISCARD. A construction with a hole wears its own copy of the
 // material, alpha-masked (`construction::view`), and only that variant compiles the hole path
@@ -46,9 +46,9 @@ import super::terrain_shadow::visibility;
 struct SurfaceParams {
     // x: the secondary pack's repeats per metre. yzw: unused.
     secondary: vec4<f32>,
-    // Per lane, primary first: (mortar linear rgb, joint width m), (courses per m, a bed joint's
-    // height m, heads per m, leaves per m).
-    breaks: array<vec4<f32>, 4>,
+    // Per lane, primary first: (mortar linear rgb, joint width m, zero without units), (courses per
+    // m, a bed joint's height m, heads per m, leaves per m), (stagger per course in units, unused).
+    breaks: array<vec4<f32>, 6>,
 }
 
 @group(MATERIAL_BIND_GROUP) @binding(100) var<uniform> surface: SurfaceParams;
@@ -132,18 +132,22 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 @if(VERTEX_COLORS) {
     // Only a construction view's mesh draws a break face, and it always carries colours.
     if core {
-        let lane = select(0u, 2u, secondary);
+        let lane = select(0u, 3u, secondary);
         let mortar = surface.breaks[lane];
-        let units = surface.breaks[lane + 1u];
-        let course = (in.uv.y - units.y) * units.x;
-        let head = in.uv.x * units.z + 0.5 * floor(course);
-        let leaf = in.color.a * units.w + 0.5 * floor(course);
-        // The distance to the nearest joint's centre plane, m.
-        let off_joint = min(
-            min(abs(fract(course + 0.5) - 0.5) / units.x, abs(fract(head + 0.5) - 0.5) / units.z),
-            abs(fract(leaf + 0.5) - 0.5) / units.w);
-        let joint = 1.0 - smoothstep(
-            0.5 * mortar.w - footprint, 0.5 * mortar.w + footprint, off_joint);
+        var joint = 0.0;
+        if mortar.w > 0.0 {
+            let units = surface.breaks[lane + 1u];
+            let course = (in.uv.y - units.y) * units.x;
+            let shift = surface.breaks[lane + 2u].x * floor(course);
+            let head = in.uv.x * units.z + shift;
+            let leaf = in.color.a * units.w + shift;
+            // The distance to the nearest joint's centre plane, m.
+            let off_joint = min(
+                min(abs(fract(course + 0.5) - 0.5) / units.x, abs(fract(head + 0.5) - 0.5) / units.z),
+                abs(fract(leaf + 0.5) - 0.5) / units.w);
+            joint = 1.0 - smoothstep(
+                0.5 * mortar.w - footprint, 0.5 * mortar.w + footprint, off_joint);
+        }
         pbr_input.material.base_color = vec4(
             pbr_bindings::material.base_color.rgb * mix(in.color.rgb, mortar.rgb, joint),
             pbr_bindings::material.base_color.a);

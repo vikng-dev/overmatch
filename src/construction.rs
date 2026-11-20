@@ -146,9 +146,9 @@ impl ConstructionKind {
         let layout = breakage::Layout::of(&asset, &law_materials, attachments)?;
         let structure = Arc::new(layout.checked_structure(&asset)?);
         let equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&structure));
-        Ok(Self {
+        let kind = Self {
             sweep: sweep::Geometry::new(&layout.blocks, &structure)?,
-            dressing: view::Dressing::bare(&layout),
+            dressing: view::Dressing::bare(&layout)?,
             asset,
             materials,
             friction,
@@ -157,7 +157,14 @@ impl ConstructionKind {
             layout,
             structure,
             equilibrium,
-        })
+        };
+        view::refuse_folds(&kind, |e| {
+            let name = &kind.asset.materials[usize::from(kind.asset.elements[e].material)];
+            registry.visual(name).ok_or_else(|| {
+                format!("substance {name:?} names no visual; author one in materials.ron")
+            })
+        })?;
+        Ok(kind)
     }
 
     /// The friction element `k`'s colliders carry, standing or loose: its substance's.
@@ -225,8 +232,7 @@ impl ConstructionLibrary {
             let dressing = std::fs::read_to_string(&dressed).unwrap_or_else(|err| {
                 panic!("construction: {} cannot be read: {err}", dressed.display())
             });
-            kind.dressing = (kind.dressing)
-                .resolve(&dressing, &kind.asset, &kind.layout)
+            kind.dressing = view::Dressing::resolve(&dressing, &kind.asset, &kind.layout)
                 .unwrap_or_else(|err| panic!("construction: {}: {err}", dressed.display()));
             library.texts.extend([text, dressing]);
             library.kinds.insert(id.to_owned(), Arc::new(kind));

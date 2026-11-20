@@ -669,49 +669,50 @@ membership as described in “One assessment path for fixed and moving chunk gro
 
 **A masonry cut ignores the units.** The bake cuts a wall into cells through its depth
 (`tools/src/construction/fracture.rs`, `Planar`): one jittered site per `pitch_m` square on the
-piece's mid-depth plane, a `keep_share` of them kept, a site whose cell holds two corners nearer
-than 5 mm dropped (the 1 mm contact set-back swallows a face a few millimetres across), and the
-Voronoi bisectors between the rest. Every crack runs through the wall's thickness at an angle owing
-nothing to courses or head joints: a StandIn for the rate-dependent masonry fracture law (an
-impulsive load cracks through units, not only along joints), which the game does not have. The
-pitch is `Resolution`: the mean chunk scales with `pitch_m²`, so the running-bond cut's 13.5 L
-(MEASURED, 994 chunks) gives 0.21 m (DERIVED). That cut, which followed bed and head joints, is
+piece's mid-depth plane, a `keep_share` of them kept, a site whose cell holds a sliver dropped
+(`SLIVER_M`), and the Voronoi bisectors between the rest. Every crack runs through the wall's
+thickness at an angle owing nothing to courses or head joints: a StandIn for the rate-dependent
+masonry fracture law (an impulsive load cracks through units, not only along joints), which the
+game does not have. The pitch is `Resolution`: the cell a breach is drawn in and the count the
+laws and the view pay for (its reason is the spec's). The cut that followed bed and head joints is
 gone. The fixture house bakes 1,077 chunks of 15.71 m³, 3,240 joints, 920 KB (MEASURED; the
 running-bond bake: 1,122 chunks, 3,177 joints, 763 KB). In the experiment that chose the cells, a
 rammed wall gave way sooner than the bond had: an observation, not a target.
 
 **A break is drawn rough; its collider stays the cell** (view only, `construction::view::relief`,
-`assets/materials/fracture.ron`). Only a face a departed neighbour opened, and the rim beside it,
-moves, by one field of position alone (value noise, amplitude 2 cm and wavelength 9 cm, both
-`Taste`), faded against its element's hull planes: faces sharing an edge draw one curve, a piece
-fits the hole it left, and the element's silhouette never moves. Every other face draws exactly
-as it did. Displaced geometry was chosen over a shader that erodes the silhouette: it gives a real
+`assets/materials/fracture.ron`). A face a departed neighbour opened, and the matter within a
+wavelength of its edges, moves, by one field of position (value noise, `amplitude_m` and
+`wavelength_m`, both `Taste`) scaled down to nothing a wavelength from the break and faded against
+its element's hull planes: faces sharing an edge draw one curve, a piece fits the hole it left, and
+the element's silhouette never moves. Every other face draws exactly as it did. The field is a
+contraction (`MAX_WARP_SLOPE`), so no drawn outline folds; the load gate sweeps every open face
+(`view::refuse_folds`). Displaced geometry was chosen over a shader that erodes the silhouette: it gives a real
 outline, self-shadowing and shadows. Relief on every face of every swapped chunk was rejected: an
 intact house drew 16,804 triangles in 14.2 ms (MEASURED on the first experiment). A break face shows
 its substance's exposed colour, with mortar where the wall's bed, head and leaf joint planes cross
-it, read at its asset-frame position so they travel with a piece: course and head spacing MEASURED
-from `brick_wall_006`'s spectra, the leaf DERIVED from the brick size the course fits. Bed and head
-planes alone left parallel stripes on every face, since every cut contains the wall's depth as
-they do. A face
-beside a break whose drawn outline folds, being narrower than the relief beside it, keeps its law
-outline's triangles and can turn one away (lens backlog). A redraw rebuilds only the elements whose
-standing chunks changed; chunk adjacency is read once per kind from the joints.
+it when its visual states units, read at its asset-frame position so they travel with a piece:
+course and head spacing MEASURED from `brick_wall_006`'s spectra, leaves counted from the
+element's own face, the bond's stagger data. Bed and head planes alone left parallel stripes on
+every face, since every cut contains the wall's depth as they do. A crack strip follows its edge
+as drawn. A redraw rebuilds only the elements whose standing chunks changed; chunk adjacency is
+read once per kind from the joints.
 
 MEASURED view cost (`edit` profile, best of five; main is the running-bond bake drawn bare):
 
 | | main | cells, drawn breaks |
 |---|---|---|
-| intact house | 668 tris, 0.51 ms | 668 tris, 0.51 ms |
-| one section broken (largest element, one chunk gone) | 1,580 tris, 0.85 ms | 2,448 tris, 0.85 ms fresh; 0.47 ms cached |
-| every element swapped, all standing | 13,796 tris, 5.4 ms | 18,540 tris, 2.3 ms |
-| every chunk its own piece | 13,796 tris, 6.6 ms | 146,232 tris, 68 ms |
-| every joint cracked | 19,166 tris, 1.5 ms | 20,496 tris, 1.8 ms |
-| chunk adjacency, once per kind | none | 0.48 ms |
+| intact house | 668 tris, 0.51 ms | 668 tris, 0.53 ms |
+| one section broken (largest element, one chunk gone) | 1,580 tris, 0.85 ms | 2,988 tris, 1.09 ms fresh; 0.63 ms cached |
+| every element swapped, all standing | 13,796 tris, 5.4 ms | 18,540 tris, 2.5 ms |
+| every chunk its own piece | 13,796 tris, 6.6 ms | 160,736 tris, 82 ms |
+| every joint cracked | 19,166 tris, 1.5 ms | 20,496 tris, 2.5 ms |
+| chunk adjacency, once per kind | none | 0.52 ms |
+| fold sweep, once per kind at load (`view::refuse_folds`) | none | 57 ms |
 
-The most relief is every chunk drawn as its own piece: each open face cut every 4 cm along its
-edges (DERIVED). A piece of several chunks draws fewer, its inner faces flat. No cap: the
+The most relief is every chunk drawn as its own piece: each open face cut every `edge_pitch_m`
+along its edges. A piece of several chunks draws fewer, its inner faces flat. No cap: the
 triangles are far inside a frame's budget, and the build cost falls on the frames pieces are
-born in: 63 µs a single-chunk piece (MEASURED), a few milliseconds when one element crumbles into
+born in: 76 µs a single-chunk piece (MEASURED), a few milliseconds when one element crumbles into
 single chunks at once.
 
 **A blast removes the fractured zone about what it crushes** (`fracture::strike`). A face load's

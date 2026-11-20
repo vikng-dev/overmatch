@@ -22,8 +22,8 @@
 //! own mesh ([`broken_mesh`]): whole elements as before, a swapped element's standing chunks as
 //! their hulls, framed exactly as the element's faces, so a swapped wall looks unchanged until a
 //! chunk goes; one with nothing left standing draws no mesh at all, never an empty one. A relieved
-//! material draws the faces a departed neighbour opened, and their rims, rough ([`relief`]). A
-//! redraw rebuilds only the elements whose drawn chunks moved ([`Sections`]). Cracks are
+//! material draws the faces a departed neighbour opened, and the matter beside them, rough
+//! ([`relief`]). A redraw rebuilds only the elements whose drawn chunks moved ([`Sections`]). Cracks are
 //! dark strips where an opened seam meets its element's surface ([`crack_mesh`]). A fallen group
 //! draws its chunks' hulls on its body or carrier ([`piece_mesh`]), holes and all. A fallen chunk
 //! stays on its construction, where it stood, until a shown group draws it ([`ShownOnPieces`]): a
@@ -55,7 +55,6 @@
 //! ([`crate::vfx::construction_dressing`]); an undressed face's is white.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -74,7 +73,7 @@ use crate::scatter::MapInstance;
 use crate::track::oracle::HullField;
 
 mod relief;
-pub(crate) use relief::break_params;
+pub(crate) use relief::{break_params, refuse_folds};
 
 /// `<id>.dressing.ron` as authored or generated (module doc).
 #[derive(Debug, serde::Deserialize)]
@@ -107,9 +106,8 @@ pub(crate) struct Dressing {
     /// Per element: the planes of its hull that are original exterior of a skinned part.
     skin: Vec<Vec<(Vec3, f32)>>,
     cards: Vec<Card>,
-    /// Per law chunk, per face: `None` on its element's hull, else the chunks of its element
-    /// across it ([`relief::across`]).
-    across: Arc<Vec<Vec<Option<Vec<u16>>>>>,
+    /// Per law chunk, per face, the chunks across it ([`relief::across`]).
+    across: Vec<Vec<Option<Vec<u16>>>>,
 }
 
 /// Resolution: a card's corners lie within this distance (m) of their mean plane; the generator
@@ -123,22 +121,21 @@ const ON_PLANE_MIN_COS: f32 = 0.99;
 
 impl Dressing {
     /// A construction drawn bare: no skin and no card. The bake's admission and the inline fixtures,
-    /// which hold no dressing file.
-    pub(crate) fn bare(layout: &Layout) -> Self {
-        Self {
+    /// which hold no dressing file. Refuses what [`relief::across`] refuses.
+    pub(crate) fn bare(layout: &Layout) -> Result<Self, String> {
+        Ok(Self {
             skin: vec![Vec::new(); layout.element_blocks.len()],
             cards: Vec::new(),
-            across: Arc::new(relief::across(layout)),
-        }
+            across: relief::across(layout)?,
+        })
     }
 
-    /// This bare dressing with the skin and cards `text` declares for the construction `asset`
-    /// laid out as `layout`. Refuses a skin naming no part of the asset, a card of fewer than three
-    /// corners, off its plane or not finite, and a card whose base lies in no law chunk: the owner
-    /// is the chunk holding the base deepest, the lowest on a tie, so a base on a shared face has
-    /// one owner.
+    /// The skin and cards `text` declares for the construction `asset` laid out as `layout`.
+    /// Refuses what [`relief::across`] refuses, a skin naming no part of the asset, a card of fewer
+    /// than three corners, off its plane or not finite, and a card whose base lies in no law chunk:
+    /// the owner is the chunk holding the base deepest, the lowest on a tie, so a base on a shared
+    /// face has one owner.
     pub(crate) fn resolve(
-        &self,
         text: &str,
         asset: &ConstructionAsset,
         layout: &Layout,
@@ -203,19 +200,22 @@ impl Dressing {
         Ok(Self {
             skin,
             cards,
-            across: self.across.clone(),
+            across: relief::across(layout)?,
         })
     }
 
     /// Whether a face of element `e`, outward `n` through `corners`, is original exterior skin.
     fn skins(&self, e: usize, n: Vec3, corners: &[Vec3]) -> bool {
-        self.skin[e].iter().any(|(out, offset)| {
-            out.dot(n) > ON_PLANE_MIN_COS
-                && corners
-                    .iter()
-                    .all(|p| (out.dot(*p) - offset).abs() < CRACK_FACE_TOLERANCE_M)
-        })
+        self.skin[e]
+            .iter()
+            .any(|&plane| on_plane(plane, n, corners))
     }
+}
+
+/// Whether a face, outward `n` through `corners`, lies on the plane `(out, offset)`.
+fn on_plane((out, offset): (Vec3, f32), n: Vec3, corners: &[Vec3]) -> bool {
+    out.dot(n) > ON_PLANE_MIN_COS
+        && (corners.iter()).all(|p| (out.dot(*p) - offset).abs() < CRACK_FACE_TOLERANCE_M)
 }
 
 /// Whether element `e`'s hull plane meets another element or the ground: a joint from one of its
@@ -296,6 +296,9 @@ fn run(points: &[Vec3]) -> Vec3 {
 struct ElementLook {
     frame: SurfaceFrame,
     run: Vec3,
+    /// Across its depth (`run × Y`, unit), and its hull's least extent along it: the face its
+    /// leaves are laid from.
+    depth: (Vec3, f32),
     secondary: bool,
     /// Its visual's break relief, `None` for a visual drawn as its bare hull.
     relief: Option<&'static relief::Relief>,
@@ -312,19 +315,47 @@ impl ElementLook {
             .hard(material)
             .expect("an admitted construction's material is a hard substance")
             .feedback;
+        let points = element.points();
+        let run = run(&points);
+        let depth = run.cross(Vec3::Y);
+        let from = (points.iter())
+            .map(|p| p.dot(depth))
+            .fold(f32::INFINITY, f32::min);
         Self {
             frame: element.surface_frame,
-            run: run(&element.points()),
+            run,
+            depth: (depth, from),
             secondary: crate::construction_surface::lane_for_substance(material)
                 == crate::construction_surface::SurfaceLane::Secondary,
-            relief: relief::of(
-                registry
-                    .visual(material)
-                    .expect("an admitted construction's material names a visual"),
-            ),
+            relief: relief_of(asset, e),
             core: feedback.exposed_linear(),
         }
     }
+
+    /// Element `e`'s breaks where the chunks `drawn` names are drawn together: none for a visual
+    /// drawn bare.
+    fn breaks(
+        &self,
+        kind: &ConstructionKind,
+        e: usize,
+        drawn: &dyn Fn(usize) -> bool,
+    ) -> relief::Breaks {
+        match self.relief {
+            Some(_) => relief::Breaks::of(kind, e, drawn),
+            None => relief::Breaks::default(),
+        }
+    }
+}
+
+/// Element `e`'s visual's break relief, `None` for a visual drawn as its bare hull.
+fn relief_of(asset: &ConstructionAsset, e: usize) -> Option<&'static relief::Relief> {
+    let material = &asset.materials[usize::from(asset.elements[e].material)];
+    let registry = crate::substances::SubstanceRegistry::shipped_static();
+    relief::of(
+        registry
+            .visual(material)
+            .expect("an admitted construction's material names a visual"),
+    )
 }
 
 /// A mesh's faces as they are added, each framed in metres (module doc).
@@ -341,6 +372,14 @@ struct Faces {
 
 /// An untinted face's vertex colour: its surface as its substance draws it.
 const UNTINTED: [f32; 4] = [1.0; 4];
+
+/// What a face's vertices show: its photograph framed in metres under a tint (a hull face), or its
+/// substance's exposed matter (a cut face, [`relief`]).
+#[derive(Clone, Copy)]
+enum Skin {
+    Hull([f32; 4]),
+    Core,
+}
 
 /// A presentation tint as the vertex colour carries it: linear RGB, opaque.
 fn tint(srgb: Vec3) -> [f32; 4] {
@@ -362,25 +401,51 @@ impl Faces {
         offset: Vec3,
         (tag, tint): (f32, [f32; 4]),
     ) {
-        if corners.len() < 3 {
-            return;
-        }
+        let vertices: Vec<(Vec3, Vec3)> = corners.iter().map(|&p| (p, n)).collect();
+        // Corners run counter-clockwise seen from outside: a fan from the first.
+        let fan: Vec<[usize; 3]> = (2..corners.len()).map(|k| [0, k - 1, k]).collect();
+        self.polygon(n, &vertices, &fan, look, offset, (tag, Skin::Hull(tint)));
+    }
+
+    /// A face of outward normal `n` in its element's `look`: its `vertices` (where drawn, asset
+    /// frame, and their normals) joined by `triangles`, drawn `offset` back while framed where they
+    /// are drawn. A hull face's photograph is framed by [`tangent`]; a cut face is laid out as
+    /// `construction_surface.wesl` reads a core face.
+    fn polygon(
+        &mut self,
+        n: Vec3,
+        vertices: &[(Vec3, Vec3)],
+        triangles: &[[usize; 3]],
+        look: &ElementLook,
+        offset: Vec3,
+        (tag, skin): (f32, Skin),
+    ) {
         let t = tangent(n, look.frame, look.run);
         let b = n.cross(t);
+        let lane = if look.secondary { 1.0 } else { 0.0 };
         let first = u32::try_from(self.positions.len()).expect("a construction's mesh fits u32");
-        for p in corners {
-            self.positions.push((*p - offset).to_array());
-            self.normals.push(n.to_array());
+        for &(p, normal) in vertices {
+            self.positions.push((p - offset).to_array());
+            self.normals.push(normal.to_array());
             self.tangents.push(t.extend(1.0).to_array());
-            self.uvs.push([p.dot(t), -p.dot(b)]);
-            self.packs
-                .push([if look.secondary { 1.0 } else { 0.0 }, tag]);
-            self.colors.push(tint);
+            match skin {
+                Skin::Hull(tint) => {
+                    self.uvs.push([p.dot(t), -p.dot(b)]);
+                    self.packs.push([lane, tag]);
+                    self.colors.push(tint);
+                }
+                Skin::Core => {
+                    let (depth, from) = look.depth;
+                    self.uvs.push([p.dot(look.run), p.y]);
+                    self.packs.push([2.0 + lane, tag]);
+                    let core = Vec3::from_array(look.core).extend(p.dot(depth) - from);
+                    self.colors.push(core.to_array());
+                }
+            }
         }
-        // Corners run counter-clockwise seen from outside: a fan from the first.
-        for k in 1..corners.len() as u32 - 1 {
-            self.indices.extend([first, first + k, first + k + 1]);
-        }
+        let triangles = triangles.iter().flatten();
+        self.indices
+            .extend(triangles.map(|&v| first + u32::try_from(v).expect("within the mesh")));
     }
 
     /// Element `e`'s hull faces in its `look`, its original exterior skinned, and its owned cards.
@@ -398,27 +463,37 @@ impl Faces {
     }
 
     /// Law chunk `c`'s hull in its element's `look`, drawn `offset` back, its faces tagged `tag`
-    /// (module doc), its original exterior skinned, its breaks relieved beside the chunks
-    /// `together` names ([`relief`]), and the cards it owns.
+    /// (module doc), its original exterior skinned, relieved beside its element's `breaks`
+    /// ([`relief`]), and the cards it owns.
     fn chunk(
         &mut self,
         kind: &ConstructionKind,
         c: usize,
         look: &ElementLook,
         (offset, tag): (Vec3, f32),
-        together: &dyn Fn(usize) -> bool,
+        breaks: &relief::Breaks,
     ) {
         match look.relief {
-            Some(relief) => relief.chunk(self, kind, c, look, (offset, tag), together),
-            None => {
-                let e = usize::from(kind.layout.element_of[c]);
-                for (n, corners) in kind.layout.blocks[c].faces() {
-                    let tint = skin_tint(kind, e, n, &corners);
-                    self.face(n, &corners, look, offset, (tag, tint));
-                }
-            }
+            Some(relief) => relief.chunk(self, kind, c, look, (offset, tag), breaks),
+            None => self.hull(kind, c, look, (offset, tag)),
         }
         self.cards(kind, look, |owner| owner == c, offset);
+    }
+
+    /// Law chunk `c`'s bare hull faces in its element's `look`, drawn `offset` back and tagged
+    /// `tag`, its original exterior skinned.
+    fn hull(
+        &mut self,
+        kind: &ConstructionKind,
+        c: usize,
+        look: &ElementLook,
+        (offset, tag): (Vec3, f32),
+    ) {
+        let e = usize::from(kind.layout.element_of[c]);
+        for (n, corners) in kind.layout.blocks[c].faces() {
+            let tint = skin_tint(kind, e, n, &corners);
+            self.face(n, &corners, look, offset, (tag, tint));
+        }
     }
 
     /// `other`'s faces after these.
@@ -506,8 +581,9 @@ pub(crate) fn broken_mesh(kind: &ConstructionKind, shape: &Shape, sections: &mut
             match &drawn {
                 None => own.element(kind, e, &look),
                 Some(_) => {
+                    let breaks = look.breaks(kind, e, &standing);
                     for c in kind.layout.chunks_of(e).filter(|&c| standing(c)) {
-                        own.chunk(kind, c, &look, (Vec3::ZERO, (c + 1) as f32), &standing);
+                        own.chunk(kind, c, &look, (Vec3::ZERO, (c + 1) as f32), &breaks);
                     }
                 }
             }
@@ -524,10 +600,16 @@ pub(crate) fn broken_mesh(kind: &ConstructionKind, shape: &Shape, sections: &mut
 pub(crate) fn piece_mesh(kind: &ConstructionKind, chunks: &[u16], origin: Vec3) -> Mesh {
     let mut faces = Faces::default();
     let together = |c: usize| chunks.iter().any(|&o| usize::from(o) == c);
+    let mut elements = BTreeMap::new();
     for (k, &c) in chunks.iter().enumerate() {
         let c = usize::from(c);
-        let look = ElementLook::of(&kind.asset, usize::from(kind.layout.element_of[c]));
-        faces.chunk(kind, c, &look, (origin, (k + 1) as f32), &together);
+        let e = usize::from(kind.layout.element_of[c]);
+        let (look, breaks) = elements.entry(e).or_insert_with(|| {
+            let look = ElementLook::of(&kind.asset, e);
+            let breaks = look.breaks(kind, e, &together);
+            (look, breaks)
+        });
+        faces.chunk(kind, c, look, (origin, (k + 1) as f32), breaks);
     }
     faces.mesh()
 }
@@ -606,13 +688,16 @@ const CRACK_FACE_TOLERANCE_M: f32 = 1e-3;
 
 /// The cracks a broken construction shows, in its frame at authored size: for every cracked joint between
 /// two standing chunks, a dark strip along each edge of their shared face that lies on a bounding
-/// plane of the first chunk's element, where the crack opens to the element's surface. `None` when
-/// no crack shows.
+/// plane of the first chunk's element, where the crack opens to the element's surface, drawn
+/// where [`broken_mesh`] draws that edge ([`relief`]). `None` when no crack shows.
 pub(crate) fn crack_mesh(
-    layout: &Layout,
+    kind: &ConstructionKind,
     shape: &Shape,
     look: &crate::vfx::ConstructionCracks,
 ) -> Option<Mesh> {
+    let layout = &kind.layout;
+    let standing = |c: usize| shape.fate[c] == Fate::Standing;
+    let mut relieved = BTreeMap::new();
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for (j, joint) in layout.joints.iter().enumerate() {
         let Side::Chunk(b) = joint.b else {
@@ -627,27 +712,37 @@ pub(crate) fn crack_mesh(
         let face_a = layout.blocks[joint.a].face_on(joint.centroid, joint.normal);
         let face_b = layout.blocks[b].face_on(joint.centroid, joint.normal);
         let polygon = clip_polygon(&face_a, &face_b, joint.normal);
-        let element = &layout.element_blocks[usize::from(layout.element_of[joint.a])];
+        let e = usize::from(layout.element_of[joint.a]);
         for k in 0..polygon.len() {
             let (p, q) = (polygon[k], polygon[(k + 1) % polygon.len()]);
-            let along = q - p;
-            if along.length() < CRACK_EDGE_MIN_M {
+            if p.distance(q) < CRACK_EDGE_MIN_M {
                 continue;
             }
-            for &(out, offset) in &element.planes {
+            for &(out, offset) in &layout.element_blocks[e].planes {
                 let on = |x: Vec3| (out.dot(x) - offset).abs() < CRACK_FACE_TOLERANCE_M;
                 if !(on(p) && on(q)) {
                     continue;
                 }
-                let side = out.cross(along.normalize()) * look.half_width_m;
-                let lift = out * look.standoff_m;
-                let first = positions.len() as u32;
-                for corner in [p - side, q - side, q + side, p + side] {
-                    positions.push((corner + lift).to_array());
-                    normals.push(out.to_array());
+                let relieved = relieved.entry(e).or_insert_with(|| {
+                    relief_of(&kind.asset, e)
+                        .map(|relief| (relief, relief::Breaks::of(kind, e, &standing)))
+                });
+                let line = match relieved {
+                    Some((relief, breaks)) => relief.line(kind, e, breaks, (p, q)),
+                    None => vec![p, q],
+                };
+                for pair in line.windows(2) {
+                    let (p, q) = (pair[0], pair[1]);
+                    let side = out.cross((q - p).normalize()) * look.half_width_m;
+                    let lift = out * look.standoff_m;
+                    let first = positions.len() as u32;
+                    for corner in [p - side, q - side, q + side, p + side] {
+                        positions.push((corner + lift).to_array());
+                        normals.push(out.to_array());
+                    }
+                    // `side` is `out × along`: p − side → q − side → q + side turns about `out`.
+                    indices.extend([first, first + 1, first + 2, first, first + 2, first + 3]);
                 }
-                // `side` is `out × along`: p − side → q − side → q + side turns about `out`.
-                indices.extend([first, first + 1, first + 2, first, first + 2, first + 3]);
             }
         }
     }
@@ -893,8 +988,8 @@ fn redraw(
         };
         let broken = broken_mesh(kind, &shape, sections);
         let mesh = (broken.count_vertices() > 0).then(|| meshes.add(broken));
-        let cracks = crack_mesh(&kind.layout, &shape, crate::vfx::construction_cracks())
-            .map(|m| meshes.add(m));
+        let cracks =
+            crack_mesh(kind, &shape, crate::vfx::construction_cracks()).map(|m| meshes.add(m));
         match (&mesh, drawn) {
             (Some(mesh), Some(mut drawn)) => drawn.0 = mesh.clone(),
             (Some(mesh), None) => {
@@ -1405,7 +1500,7 @@ mod tests {
         )
         .expect("the fixture meets collider admission");
         let mut kind = (*shipped_house()).clone();
-        kind.dressing = Dressing::bare(&layout);
+        kind.dressing = Dressing::bare(&layout).expect("the fixture's joints lie on cuts");
         (kind.asset, kind.layout) = (asset, layout);
         let mut faces = Faces::default();
         faces.element(&kind, 0, &ElementLook::of(&kind.asset, 0));
@@ -1440,9 +1535,11 @@ mod tests {
     /// must scale each strip's width and lift. A fixed width or standoff fails either choice.
     #[test]
     fn crack_geometry_reads_its_presentation_owner() {
-        let mut layout = shipped_house().layout.clone();
+        let mut kind = (*shipped_house()).clone();
+        let layout = &mut kind.layout;
         layout.chunks = vec![0, 1];
         layout.element_of = vec![0, 0];
+        layout.elements = vec![Some((0, 2))];
         layout.blocks = vec![
             Block::cuboid(Vec3::ZERO, Vec3::ONE),
             Block::cuboid(Vec3::X, Vec3::new(2.0, 1.0, 1.0)),
@@ -1455,7 +1552,8 @@ mod tests {
         joint.centroid = Vec3::new(1.0, 0.5, 0.5);
         joint.normal = Vec3::X;
         layout.joints = vec![joint];
-        let mut shape = Shape::intact(&layout);
+        kind.dressing = Dressing::bare(&kind.layout).expect("the fixture's joint lies on a cut");
+        let mut shape = Shape::intact(&kind.layout);
         shape.cracked[0] = true;
         let owner = crate::vfx::construction_cracks();
         for scale in [0.5, 2.0] {
@@ -1464,8 +1562,7 @@ mod tests {
                 standoff_m: owner.standoff_m * scale,
                 color_srgb: owner.color_srgb,
             };
-            let mesh =
-                crack_mesh(&layout, &shape, &look).expect("the fixture opens surface cracks");
+            let mesh = crack_mesh(&kind, &shape, &look).expect("the fixture opens surface cracks");
             let Some(VertexAttributeValues::Float32x3(positions)) =
                 mesh.attribute(Mesh::ATTRIBUTE_POSITION)
             else {
@@ -1486,7 +1583,7 @@ mod tests {
                     "width {width}"
                 );
                 let normal = Vec3::from_array(normals[k * 4]);
-                let (_, offset) = layout.element_blocks[0]
+                let (_, offset) = kind.layout.element_blocks[0]
                     .planes
                     .iter()
                     .find(|(n, _)| n.dot(normal) > 0.99)
@@ -1519,6 +1616,7 @@ mod tests {
             let look = ElementLook {
                 frame: SurfaceFrame::Upright,
                 run: run(&corners),
+                depth: (Vec3::Z, 0.0),
                 secondary: false,
                 relief: None,
                 core: [1.0; 3],
@@ -2530,10 +2628,7 @@ mod tests {
             );
         }
         let text = format!("(skin: [], cards: [{cards}])");
-        kind.dressing = kind
-            .dressing
-            .resolve(&text, &kind.asset, &kind.layout)
-            .expect("fixture cards");
+        kind.dressing = Dressing::resolve(&text, &kind.asset, &kind.layout).expect("fixture cards");
         for (card, &c) in kind.dressing.cards.iter().zip(owners) {
             assert_eq!(
                 card.owner, c,
@@ -2699,7 +2794,7 @@ mod tests {
                 p(base),
                 corners.join(", ")
             );
-            kind.dressing.resolve(&text, &kind.asset, &kind.layout)
+            Dressing::resolve(&text, &kind.asset, &kind.layout)
         };
         let shared = resolve(joint.centroid, "").expect("a base on a shared face");
         assert_eq!(shared.cards[0].owner, joint.a.min(b));
@@ -2709,10 +2804,7 @@ mod tests {
         let error = resolve(joint.centroid, "\"no_such_part\"").unwrap_err();
         assert!(error.contains("no element declares"), "{error}");
         let text = "(skin: [], cards: [(base: (0.0, 0.0, 0.0), corners: [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)])])";
-        let error = kind
-            .dressing
-            .resolve(text, &kind.asset, &kind.layout)
-            .unwrap_err();
+        let error = Dressing::resolve(text, &kind.asset, &kind.layout).unwrap_err();
         assert!(error.contains("one plane"), "{error}");
     }
 
@@ -2785,5 +2877,3 @@ mod tests {
         assert!(barked > 0 && cut > 0, "{barked} bark, {cut} cut triangles");
     }
 }
-
-// TEMPORARY cost probe for the brick-fracture lane's report; never committed.
