@@ -211,14 +211,7 @@ pub fn chunks(piece: &Piece, asset: &str) -> Result<Vec<Polyhedron>, String> {
                     }
                 }
             }
-            // Each site whose cell holds a sliver goes, the first in order first, until none does.
-            loop {
-                let cells = voronoi(solid, &sites, |v| v);
-                match cells.iter().position(sliver) {
-                    Some(k) if sites.len() > 1 => sites.remove(k),
-                    _ => return Ok(cells),
-                };
-            }
+            Ok(without_slivers(solid, sites))
         }
         Pattern::Cells(rule) => {
             let (size, stretch) = (rule.size_m.0, rule.stretch.0);
@@ -264,8 +257,23 @@ pub fn chunks(piece: &Piece, asset: &str) -> Result<Vec<Polyhedron>, String> {
 /// across; far below a chunk's size at any authored pitch.
 pub const SLIVER_M: f64 = 5e-3;
 
+/// The cells of `sites` in `solid`, a site whose cell holds a sliver dropped, the first in order
+/// first, until none does. `solid` is no sliver itself.
+pub(super) fn without_slivers(solid: &Polyhedron, mut sites: Vec<DVec3>) -> Vec<Polyhedron> {
+    loop {
+        let cells = voronoi(solid, &sites, |v| v);
+        match cells.iter().position(sliver) {
+            None => return cells,
+            Some(_) if sites.len() < 2 => {
+                unreachable!("fewer than two sites leave the solid, which is no sliver")
+            }
+            Some(k) => sites.remove(k),
+        };
+    }
+}
+
 /// Whether two of `cell`'s corners lie nearer than [`SLIVER_M`].
-fn sliver(cell: &Polyhedron) -> bool {
+pub(super) fn sliver(cell: &Polyhedron) -> bool {
     let corners = &cell.corners;
     (0..corners.len()).any(|i| {
         corners[i + 1..]
@@ -278,7 +286,7 @@ fn sliver(cell: &Polyhedron) -> bool {
 /// linear `metric` `M`: a site `b` takes from `a`'s cell the half-space `M(b − a) · p > (b·Mb −
 /// a·Ma) / 2`. `M(−v)` is `−M(v)` to the bit, so two neighbours cut on one plane, facing opposite
 /// ways. Fewer than two sites leave the solid whole.
-fn voronoi(
+pub(super) fn voronoi(
     solid: &Polyhedron,
     sites: &[DVec3],
     metric: impl Fn(DVec3) -> DVec3,

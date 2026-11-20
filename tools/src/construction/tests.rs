@@ -58,8 +58,7 @@ fn two_bakes_write_the_same_bytes_and_the_shipped_file_is_one() {
 /// mid-air.
 #[test]
 fn every_chunk_is_joined_to_the_ground_and_anchors_lie_on_the_foundation() {
-    for (spec, asset) in shipped() {
-        let asset = &asset;
+    for (spec, asset) in &shipped() {
         let id = &spec.construction.id;
         let n = asset.chunks.len();
         assert!(!asset.anchors.is_empty(), "{id}: no anchor");
@@ -114,8 +113,7 @@ fn every_chunk_is_joined_to_the_ground_and_anchors_lie_on_the_foundation() {
 /// fails, though a box test admits it wherever two boards' bounds overlap.
 #[test]
 fn the_chunks_tile_each_element() {
-    for (spec, asset) in shipped() {
-        let asset = &asset;
+    for (spec, asset) in &shipped() {
         let id = &spec.construction.id;
         for (element, piece) in asset.elements.iter().zip(&spec.construction.pieces) {
             let [first, end] = element.chunks;
@@ -155,8 +153,7 @@ fn the_chunks_tile_each_element() {
 /// faces fails here.
 #[test]
 fn every_interface_is_one_contact() {
-    for (spec, asset) in shipped() {
-        let asset = &asset;
+    for (spec, asset) in &shipped() {
         let id = &spec.construction.id;
         let mut inner = vec![0.0; asset.chunks.len()];
         let mut outer = vec![0.0; asset.chunks.len()];
@@ -535,12 +532,11 @@ fn cells_partition_their_piece() {
 
 /// A PLANAR CUT RUNS THROUGH THE WHOLE DEPTH AND LEAVES NO SLIVER: on a slab whose depth runs off
 /// every axis, the chunks sum to the slab, each chunk's every face is the slab's own or parallel to
-/// the depth, and no chunk holds two corners nearer than [`fracture::SLIVER_M`]. The view draws a
-/// break across the wall's thickness and the contact hull stands each joint face a millimetre
-/// back; a cut ending inside the wall, or a sliver the set-back swallows, breaks both, and a slab
-/// thinner than a sliver is refused rather than baked whole. Mutants: sites off the mid-depth
-/// plane, no sliver drop, or no refusal fail here. Fixture: a 1.2 × 0.9 m slab 0.25 m deep, sites
-/// 0.06 m apart.
+/// the depth, and no chunk holds two corners nearer than [`fracture::SLIVER_M`]; four sites
+/// placed by hand whose cells hold a sliver lose it to the drop. The view draws a break across the
+/// wall's thickness and the contact hull rests on no sliver; a slab thinner than a sliver is
+/// refused rather than baked whole. Mutants: sites off the mid-depth plane, no sliver drop, or no
+/// refusal fail here. Fixture: a 1.2 × 0.9 m slab 0.25 m deep, sites 0.06 m apart.
 #[test]
 fn a_planar_cut_runs_through_the_depth_and_leaves_no_sliver() {
     let depth = DVec3::new(1.0, 0.3, 2.0).normalize();
@@ -574,6 +570,25 @@ fn a_planar_cut_runs_through_the_depth_and_leaves_no_sliver() {
     assert!(err.contains("slab") && err.contains("Whole"), "{err}");
     piece.solid = slab(0.25);
     let slab = &piece.solid;
+    // Nearly cocircular, so their bisectors meet in two corners 2 mm apart (DERIVED: (b² − a²) / b
+    // for a = 0.2 m and b = 0.201 m).
+    let centre = u * 0.6 + v * 0.45 + depth * 0.125;
+    let sites = vec![
+        centre - u * 0.2,
+        centre + u * 0.2,
+        centre + v * 0.201,
+        centre - v * 0.201,
+    ];
+    assert!(
+        fracture::voronoi(slab, &sites, |v| v)
+            .iter()
+            .any(fracture::sliver)
+    );
+    assert!(
+        !fracture::without_slivers(slab, sites)
+            .iter()
+            .any(fracture::sliver)
+    );
     let cut = fracture::chunks(&piece, "fixture").unwrap();
     assert!(cut.len() > 1, "the fixture is cut");
     let volume: f64 = cut.iter().map(Polyhedron::volume).sum();
@@ -818,8 +833,7 @@ fn assert_bond_kinds(construction: &Construction, asset: &ConstructionAsset) {
 /// changes those bonds alone, preserving the joint graph.
 #[test]
 fn every_bond_between_components_is_the_kind_its_spec_names() {
-    for (spec, asset) in shipped() {
-        let asset = &asset;
+    for (spec, asset) in &shipped() {
         let built = &spec.construction;
         assert_bond_kinds(built, asset);
         for (k, join) in built.joins.iter().enumerate() {
