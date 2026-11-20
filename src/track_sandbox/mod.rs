@@ -23,7 +23,8 @@
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, Collider, CollisionLayers, Forces, LayerMask, LinearVelocity,
     Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Physics, PhysicsDebugPlugin,
-    PhysicsGizmos, PhysicsTime, ReadRigidBodyForces, RigidBody, WriteRigidBodyForces,
+    PhysicsGizmos, PhysicsTime, ReadRigidBodyForces, RigidBody, SleepingDisabled,
+    WriteRigidBodyForces,
 };
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -1064,6 +1065,9 @@ fn build_rig(
             NoAutoMass,
             NoAutoAngularInertia,
             NoAutoCenterOfMass,
+            // The sandbox mirrors no rest judgement: its hull stays awake, so every physics
+            // interval has the hull's solver state for the drivetrain the sampled pass stages.
+            SleepingDisabled,
         ))
         .with_children(|parent| {
             // The game's scene has authored hull-local vertices: an identity child aligns

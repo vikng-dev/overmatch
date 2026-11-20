@@ -360,18 +360,20 @@ fn prepare_surface_speeds(
     mut bodies: ResMut<avian3d::dynamics::solver::solver_body::SolverBodies>,
     rig: Res<RigSpec>,
     transmission: Res<RigTransmission>,
-    state: (Res<TransState>, Res<BeltSpeed>, Res<BeltPhase>),
+    state: (
+        Res<TransState>,
+        Res<BeltSpeed>,
+        Res<BeltPhase>,
+        Res<RawDriveInput>,
+    ),
     mut pending: ResMut<PendingDrivetrain>,
-    hull: Query<Option<&avian3d::dynamics::solver::solver_body::SolverBodyIndex>, With<Hull>>,
+    hull: Query<&avian3d::dynamics::solver::solver_body::SolverBodyIndex, With<Hull>>,
     time: Res<Time<avian3d::prelude::Substeps>>,
 ) {
-    let (state, belt, phase) = state;
-    let Some(index) = hull
+    let (state, belt, phase, raw) = state;
+    let index = hull
         .single()
-        .expect("the built sandbox has exactly one hull")
-    else {
-        return; // A sleeping hull has no active contact solve.
-    };
+        .expect("the built sandbox has exactly one hull, built never to sleep");
     let fp = transmission::DriveConstruction::new(rig.grip, rig.belt_inertia);
     let pending = pending.0.get_or_insert_with(|| PendingDrive {
         tick: transmission::DriveTick::contact_only(
@@ -382,10 +384,9 @@ fn prepare_surface_speeds(
                 speeds: Side::ALL.map(|s| belt.get(s)),
                 phases: Side::ALL.map(|s| phase.get(s)),
             },
+            // The sampled pass's operator and supply; only its sampled ground load is absent.
             crate::track::drive::DriveTarget {
-                intent: crate::track::drive::DriveIntent::Axes(
-                    crate::track::drive::DriveAxes::default(),
-                ),
+                intent: crate::track::drive::DriveIntent::Axes(raw.0),
                 supply: transmission::DriveSupply::WHOLE,
             },
             time.delta_secs(),
@@ -404,30 +405,28 @@ fn prepare_surface_speeds(
 
 fn collect_surface_speeds(
     bodies: Res<avian3d::dynamics::solver::solver_body::SolverBodies>,
-    hull: Query<Option<&avian3d::dynamics::solver::solver_body::SolverBodyIndex>, With<Hull>>,
+    hull: Query<&avian3d::dynamics::solver::solver_body::SolverBodyIndex, With<Hull>>,
     mut pending: ResMut<PendingDrivetrain>,
     transmission: Res<RigTransmission>,
     time: Res<Time<avian3d::prelude::Substeps>>,
 ) {
-    let Some(index) = hull
+    let index = hull
         .single()
-        .expect("the built sandbox has exactly one hull")
-    else {
-        return; // A sleeping hull has no active contact solve.
-    };
-    let tick = &mut pending
+        .expect("the built sandbox has exactly one hull, built never to sleep");
+    pending
         .0
         .as_mut()
         .expect("surface preparation creates this interval's mechanical state")
-        .tick;
-    crate::track::surface_motion::read_back(
-        bodies
-            .get(*index)
-            .expect("an active sandbox hull has solver state"),
-        tick,
-        &transmission.0,
-        time.delta_secs(),
-    );
+        .tick
+        .finish_contact(
+            &transmission.0,
+            crate::track::surface_motion::surface(
+                bodies
+                    .get(*index)
+                    .expect("an active sandbox hull has solver state"),
+            ),
+            time.delta_secs(),
+        );
 }
 
 #[expect(
