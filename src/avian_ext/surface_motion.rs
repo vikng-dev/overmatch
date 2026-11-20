@@ -634,14 +634,11 @@ mod tests {
                 for held in [true, false] {
                     let mass = 1000.0; // Fixture box mass, kg.
                     let speed = if held { 0.25 } else { 2.0 } * capacity / mass;
-                    let mut tick = unpowered_contact_tick(
-                        &fp,
-                        &tp,
-                        TransmissionState::stopped(),
-                        [0.0; 2],
-                        0.0,
-                        h,
-                    );
+                    let state = TransmissionState {
+                        park: true,
+                        ..TransmissionState::stopped()
+                    };
+                    let mut tick = unpowered_contact_tick(&fp, &tp, state, [0.0; 2], 0.0, h);
                     let mut body = SolverBody {
                         linear_velocity: Vec3::NEG_Z * speed,
                         ..Default::default()
@@ -716,14 +713,13 @@ mod tests {
             class_drivetrains, construction, unpowered_contact_tick,
         };
         use crate::track::transmission::{LaunchState, TransmissionState};
-        let coordinates = |body: &SolverBody| -> Coordinates {
+        fn coordinates(body: &SolverBody) -> &Coordinates {
             let model: &dyn core::any::Any = super::surface(body);
             model
                 .downcast_ref::<Coordinates>()
                 .or_else(|| model.downcast_ref::<EveryPushChangesFace>().map(|f| &f.0))
                 .expect("the witness installs drivetrain coordinates")
-                .clone()
-        };
+        }
         for (class, (fp, tp)) in class_drivetrains().into_iter().enumerate() {
             let fp = construction(&fp);
             let h = 1.0 / 384.0; // Fixture interval, s.

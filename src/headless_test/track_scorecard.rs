@@ -311,6 +311,7 @@ impl Bed {
             work.push(probe.assignments_tried);
             mechanical[0] += probe.mechanical_advances;
             mechanical[1] += probe.mechanical_rows;
+            // The committed solution's own search trials, 0 after a face step; not every visit's.
             mechanical[2] += probe.mechanical_assignments;
             mechanical[3] = mechanical[3].max(probe.max_substep_rows);
             mechanical[4] = mechanical[4].max(probe.max_substep_assignments);
@@ -3351,10 +3352,10 @@ fn solver_friction_readout_matches_hull_momentum_on_loose_pieces() {
     let mut opened = None;
     for tick in 0..pull {
         let previous_hard = bed.hard_reactions();
-        // The driving pass opens this tick's ledger sample along the hull's tick-start heading.
-        let hull = bed.hull();
-        let heading = bevy::math::Affine3A::from_rotation_translation(hull.rotation, hull.position)
-            .transform_vector3(Vec3::NEG_Z);
+        // The driving pass opens this tick's ledger sample along the hull's tick-start heading,
+        // as `feel_tick` builds it.
+        let heading =
+            bevy::math::Affine3A::from_quat(bed.hull().rotation).transform_vector3(Vec3::NEG_Z);
         bed.tick(1.0, 0.0);
         if let Some(heading) = opened.replace(heading) {
             let closed = bed

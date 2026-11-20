@@ -96,8 +96,9 @@ downhill. Relax-only friction fails the holding travel invariant even with final
 `-- --ignored --nocapture --test-threads=1`. The probe installs two compute workers, which
 `TaskPool::scope` joins with its calling thread, and pulls one or eight independent tanks at full
 throttle for two seconds after settling, on broad slabs or separated loose pieces. Pass costs
-include normal and ordinary contact rows, normalized by belt-face point visits in that pass. Tick time includes the whole headless app update and its
-fixture bookkeeping. This is local release pricing, not a measurement on the hosted machine.
+include normal and ordinary contact rows, normalized by belt-face point visits in that pass.
+Tick time includes the whole headless app update and its fixture bookkeeping. This is local
+release pricing, not a measurement on the hosted machine.
 
 MEASURED 2026-11-20 on the local Apple M4, Low Power Mode off, no compile running. Both builds
 use the release profile and `dev_ui,bitprobe`; `main` is `491eccdb`. The probe ran on both

@@ -27,8 +27,8 @@ The local extension exposes adapter-typed, cloneable transient scratch in `Solve
 surface-coordinate coefficients on `ContactConstraint`. One process-wide friction callback is
 registered before any coordinates are bound. It runs under graph coloring after both normal
 passes and receives warm start after the rigid-body warm impulse. Its accumulator records the
-applied impulse; game-side readers share one accessor for that convention. Ordinary contacts retain stock friction. Scratch is rebuilt
-before solving, including after deserialization.
+applied impulse; game-side readers share one accessor for that convention. Ordinary contacts
+retain stock friction. Scratch is rebuilt before solving, including after deserialization.
 
 The game owns the surface trait, capped contact row and drivetrain implementation; their
 mechanical law and measurements live in `.agents/docs/design/track-model/track-contact.md`.

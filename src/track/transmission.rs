@@ -970,8 +970,7 @@ impl TransmissionState {
         Self::with_crank_speed(tp.engine.idle_rpm * RPM_TO_RAD)
     }
 
-    /// A state at rest with its crank stopped: the fixture for tests whose subject is not the
-    /// transmission (replication scope, probe layout, HUD formatting).
+    /// Fixture: a parked state at rest with its crank stopped.
     #[cfg(test)]
     pub(crate) fn stopped() -> Self {
         Self::with_crank_speed(0.0)

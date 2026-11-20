@@ -20,10 +20,6 @@ impl Prescribed {
         );
         Self(speeds)
     }
-
-    fn speed(&self, index: usize) -> f64 {
-        f64::from(self.0[index])
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -204,7 +200,7 @@ impl SurfaceModel for Coordinates {
     fn speed(&self, index: usize) -> f64 {
         match self {
             Self::Drivetrain(drive) => drive.current().solved.speeds[index + 1],
-            Self::Prescribed(p) => p.speed(index),
+            Self::Prescribed(p) => f64::from(p.0[index]),
         }
     }
     fn mobility(&self, index: usize) -> f64 {
@@ -294,7 +290,10 @@ mod tests {
             let h = 1.0 / 384.0; // Fixture interval, s.
             let capacity = f64::from(tp.brake_capacity_n * tp.brake_static_factor * h);
             for sign in [-1.0, 1.0] {
-                let state = transmission::TransmissionState::stopped();
+                let state = transmission::TransmissionState {
+                    park: true,
+                    ..transmission::TransmissionState::stopped()
+                };
                 let mut tick = unpowered_contact_tick(&fp, &tp, state, [0.0; 2], 0.0, h);
                 let mut coordinates = tick.prepare_contact(&fp, &tp, h, false);
                 let impulse = sign * 4.0 * capacity; // Fixture: exceeds every static side-stop budget.
@@ -327,7 +326,7 @@ mod tests {
         use crate::track::drive::{DriveAxes, DriveIntent, DriveTarget};
         use crate::track::drive_fixture::{class_drivetrains, construction};
         use transmission::{DriveState, DriveSupply, DriveTick, TransmissionState};
-        let (mut stepped, mut searched, mut held, mut worst) = (0, 0, 0, 0.0_f64);
+        let (mut stepped, mut searched, mut coupled, mut worst) = (0, 0, 0, 0.0_f64);
         for (fp, tp) in class_drivetrains() {
             let fp = construction(&fp);
             let h = 1.0 / 384.0; // Fixture interval, s.
@@ -362,6 +361,8 @@ mod tests {
                             },
                             h,
                         );
+                        // The driven and pivoting cells need the target's supply carried through.
+                        assert_eq!(tick.input().supply, DriveSupply::WHOLE);
                         let mut coordinates = tick.prepare_contact(&fp, &tp, h, false);
                         let scale = 10.0 * f64::from(tp.brake_capacity_n * h);
                         let mut random = 0x1234_5678_u32;
@@ -397,7 +398,11 @@ mod tests {
                                         for row in mechanical.rows.iter().filter(|r| {
                                             r.dynamic.is_some() && !r.starts_sliding(&fresh.speeds)
                                         }) {
-                                            held += 1;
+                                            // Only a coupled held row can drift off its target.
+                                            coupled += usize::from(
+                                                row.jacobian.iter().filter(|&&a| a != 0.0).count()
+                                                    > 1,
+                                            );
                                             assert!(
                                                 !row.starts_sliding(&step.speeds),
                                                 "a step holds a brake exactly where the search does"
@@ -414,11 +419,11 @@ mod tests {
             }
         }
         println!(
-            "FACE_STEP stepped={stepped} searched={searched} held={held} worst_relative={worst:e}"
+            "FACE_STEP stepped={stepped} searched={searched} coupled={coupled} worst={worst:e}"
         );
         assert!(
-            stepped > 0 && searched > 0 && held > 0,
-            "the fixture must step along held faces and cross faces"
+            stepped > 0 && searched > 0 && coupled > 0,
+            "the fixture must step along faces holding a coupled row and cross faces"
         );
         // Resolution: the contact stores impulses in f32; a step must agree below that rounding.
         assert!(

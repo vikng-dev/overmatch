@@ -2111,13 +2111,15 @@ mod tests {
             app.world_mut()
                 .run_system_once(prepare_surface_speeds)
                 .unwrap();
-            let pending = app
+            let input = app
                 .world()
                 .get::<DrivetrainStep>(root)
                 .unwrap()
                 .pending
-                .as_ref();
-            let input = pending.unwrap().tick.input();
+                .as_ref()
+                .unwrap()
+                .tick
+                .input();
             assert_eq!(input.intent, DriveIntent::Axes(axes));
             assert_eq!(
                 (input.reactions, input.reaction_slopes),
@@ -2771,6 +2773,7 @@ mod tests {
     #[test]
     fn solver_contact_history_does_not_charge_a_belt_again() {
         use crate::contact_transfer::{ContactTransfer, ContactTransfers};
+        let step = 1.0 / 64.0; // Fixture transfer interval, s.
         let run = |impulse: f32| {
             let mu = 0.712; // Fixture contact friction.
             let (mut app, _) = adapter_app();
@@ -2806,7 +2809,7 @@ mod tests {
                     closing_speed: 0.0,
                     friction: mu,
                 }]],
-                1.0 / 64.0,
+                step,
             ));
             // The second driving pass closes the first's ledger sample with the transfer read.
             run_adapter(&mut app, &[(root, Vec3::ZERO)]);
@@ -2836,10 +2839,11 @@ mod tests {
             loaded, free,
             "a delivered impulse cannot be integrated into a belt again"
         );
-        // The ledger reads the same transfer as history: its traction over the 1/64 s step.
+        // The ledger reads the same transfer as history: its traction over the step.
+        let traction = impulse / step;
         assert_eq!(push[1], 0.0);
         assert!(
-            (push[0].abs() - impulse * 64.0).abs() <= impulse * 64.0 * 1e-6,
+            (push[0].abs() - traction).abs() <= traction * 1e-6,
             "the Driver reads the delivered traction, {push:?}"
         );
     }
