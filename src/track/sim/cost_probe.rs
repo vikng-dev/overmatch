@@ -36,18 +36,22 @@ pub(crate) fn install(app: &mut App) {
             SubstepSchedule,
             (
                 start
-                    .after(SubstepSolverSystems::WarmStart)
-                    .before(advance_drivetrains),
-                end.after(update_belt_surfaces)
-                    .before(SubstepSolverSystems::SolveConstraints),
+                    .after(avian3d::dynamics::integrator::IntegrationSystems::Velocity)
+                    .before(prepare_surface_speeds),
+                end.after(prepare_surface_speeds)
+                    .before(SubstepSolverSystems::WarmStart),
+                start
+                    .after(SubstepSolverSystems::Relax)
+                    .before(collect_surface_speeds),
+                end.after(collect_surface_speeds)
+                    .before(avian3d::dynamics::solver::xpbd::XpbdSolverSystems::SolveConstraints),
             ),
         )
         .add_systems(
             PhysicsSchedule,
             (
                 start.before(prepare_belt_surfaces),
-                end.after(prepare_belt_surfaces)
-                    .before(seed_conveyor_impulses),
+                end.after(prepare_belt_surfaces),
             )
                 .in_set(SolverSystems::PreSubstep),
         )

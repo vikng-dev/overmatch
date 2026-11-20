@@ -970,7 +970,8 @@ struct ParkTick {
     solid_contacts: usize,
     clutch: String,
     park: bool,
-    belt_reaction: [f32; 2],
+    /// Solver traction on each belt over the step just run, along the hull's heading (N).
+    belt_traction: [f32; 2],
     /// Belt surface speed per side (m/s), which substep preparation gives the runs' and stops' faces.
     belt_speed: [f32; 2],
     awake: usize,
@@ -993,6 +994,10 @@ fn park_read(bed: &mut Bed) -> ParkTick {
     use avian3d::dynamics::solver::islands::BodyIslandNode;
     bed.pieces = live_pieces(bed);
     let work = bed.take_work();
+    let forward = bed.hull().forward();
+    let belt_traction = bed
+        .hard_reactions()
+        .map(|side| side.map_or(0.0, |side| side.friction.dot(forward)));
     let world = bed.app.world();
     let to_sleep = world.resource::<TimeToSleep>().0;
     let island = |e: Entity| {
@@ -1082,10 +1087,7 @@ fn park_read(bed: &mut Bed) -> ParkTick {
         solid_contacts,
         clutch: format!("{:?}", state.clutch),
         park: state.park,
-        belt_reaction: world
-            .get::<crate::track::sim::TrackGripEffect>(bed.tank)
-            .expect("a driven tank publishes its belt reaction")
-            .belt_reaction,
+        belt_traction,
         belt_speed: world
             .get::<crate::track::sim::TrackDrive>(bed.tank)
             .expect("a driven tank carries its belt state")
@@ -1144,7 +1146,7 @@ fn park_summary(ticks: &[ParkTick]) -> Value {
     let flips = |side: usize| {
         ticks
             .windows(2)
-            .filter(|w| w[0].belt_reaction[side] * w[1].belt_reaction[side] < 0.0)
+            .filter(|w| w[0].belt_traction[side] * w[1].belt_traction[side] < 0.0)
             .count()
     };
     let belt_speed = [0, 1].map(|side| {
@@ -1207,7 +1209,7 @@ fn park_summary(ticks: &[ParkTick]) -> Value {
             "ticks_with_field_contact": count(&|t| t.field_contacts > 0),
             "park_ticks": count(&|t| t.park),
             "clutch_ticks": clutch,
-            "belt_reaction_sign_flips": [flips(0), flips(1)],
+            "belt_traction_sign_flips": [flips(0), flips(1)],
             "belt_speed_abs_mean_max_m_s": belt_speed,
             "belt_moving_ticks": belt_moving,
         },
@@ -1382,8 +1384,7 @@ fn park_case(heap: Option<(Heap, f32)>, label: &str, tag: &str) {
 
 /// Each piece in the tank's island still failing the rest test this tick (awake, its rest timer
 /// under `TimeToSleep`), with its motion and every touching manifold in the hull's frame: the other
-/// collider's role, the normal into the piece, the deepest overlap, the compliant law and conveyor
-/// velocity the solver used, and the solver's mean force on the piece over the step. The force
+/// collider's role, the normal into the piece, the deepest overlap, the compliant law and the solver's mean force on the piece over the step. The force
 /// is the collider pair's, repeated on each of its manifolds.
 fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
     use avian3d::dynamics::solver::islands::BodyIslandNode;
@@ -1461,10 +1462,6 @@ fn wedge_read(bed: &mut Bed, tick: usize) -> Vec<Value> {
                         "points": manifold.points.len(),
                         "k": law.as_ref().map(|c| c.stiffness),
                         "c": law.as_ref().map(|c| c.damping),
-                        "conveyor": local(world.resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>().colors.iter()
-                            .flat_map(|c| &c.contact_constraints)
-                            .find(|c| c.contact_id == pair.contact_id && c.manifold_index == manifold_index)
-                            .map_or(Vec3::ZERO, |c| c.tangent_velocity)),
                         "force": local(force),
                     }));
                 }

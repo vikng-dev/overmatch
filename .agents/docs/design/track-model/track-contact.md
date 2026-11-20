@@ -10,7 +10,7 @@ Numbers are MEASURED on 2026-11-08 unless labelled DERIVED or dated otherwise.
 | The belt meets | Channel | In the solver? | Owner |
 |---|---|---|---|
 | ground, standing construction, map blocks, another hull | sampled support | no | `track::forces` |
-| a wall or a step past the belt's travel | outer-face stop and side plates | yes, as solver contacts moving at belt speed | `track::bump_stop`, `track::stop_contacts` |
+| a wall or a step past the belt's travel | outer-face stop and side plates | yes, with finite-inertia surface coordinates | `track::bump_stop`, `track::stop_contacts` |
 | loose pieces | one soft run per side on `Layer::TrackBelt` | yes, as compliant contacts | `track::soft_run` |
 
 **The sampled support.** Each side has 48 stations round the closed loop and three points across
@@ -22,10 +22,132 @@ strain carries the grip. A solid takes the whole opposite reaction: a fixed cons
 load reading, a dynamic body as an impulse at the contact.
 
 **The stop.** Past the wheels' travel a full-width prism per side on `Layer::Vehicle` is the belt's
-hard limit, and thin slices at the shoe faces meet bodies laterally. Each surface moves at belt
-speed in the solver (`stop_contacts`), so friction against a wall lifts the hull at μ times the
-forward push wherever the belt wraps an end wheel. Solver friction returns to the transmission
-through one reader of the contact transfers, the runs' with it.
+hard limit, and thin slices at the shoe faces meet bodies laterally. Each surface binds its
+owner's belt coordinate (`stop_contacts`): finite drivetrain response on the authority,
+streamed prescribed speed on a replica (ADR-0037). A holding brake has zero mobility; a locked
+clutch reflects crank inertia; sampled reaction slopes augment belt inertia. Each impulse changes
+both rigid bodies and the owner's mechanical solution in the same substep. Readback commits that
+solution before the next substep; contact transfers supply traction history to the Driver's
+ledger. Friction against a wall can lift the hull wherever the belt wraps an end wheel.
+
+The contact has two exits. It takes a Coulomb-disk step using the current mechanical face's
+mobility and pushes the impulse to each owner. On one face the owner's speeds, row impulses and
+limit multipliers are affine in contact impulse, so the owner steps along its face when a search
+trial's tests accept the step; otherwise it re-solves from the substep-start state and current
+contact totals. An unchanged face accepts that solution; a changed face gets one corrective step.
+If the face changes again, the row removes this point's entire impulse, including its cached warm
+start, measures slip at zero total impulse, and takes a bare-belt-inertia disk step from zero.
+The work reference must be zero impulse: a warm base can already contain numerical energy.
+Within a fixed regime, bare mobility bounds the constrained response from above; relaxation
+carries the undershoot. The band where neither a held nor a sliding answer is self-consistent
+belongs to our regime rule, not to the friction law: each search restarts a brake static and
+judges it against the current contact totals as a fixed load, so a sliding total below static
+capacity holds it again. A hull pressing a held belt then slips with friction inside its Coulomb
+disk until its slip passes what the held brake stops by (S − K)·h/I, with S and K the static and
+kinetic ratings, h the substep and I the belt inertia: about 0.018 m/s for the Tiger at six
+substeps (DERIVED). The second exit bounds work there rather than demanding per-point
+convergence. `disk_minimum` owns the disk law, `block::solve_limited` owns regimes,
+`Solution::response` supplies face mobility and sensitivities, and `Solution::step` follows them.
+The seam's trait knows no drivetrain types.
+
+Finite-surface friction runs after both normal passes, sharing one accumulated impulse and one
+mechanical budget. The game deliberately retains the biased pass: fresh contacts must hold
+before position integration, as witnessed with warm start on and with cached friction cleared.
+
+**Parked-slab observation (MEASURED 2026-11-20).** Run the ignored
+`headless_test::track_scorecard::parked_solver_slab_creep` test with `--ignored --nocapture`.
+The shipped tank stands awake on a static
+`Debris` slab, with no sampled support, at 64 Hz. These are observations of the suspension and
+contact composition, not regression targets. Mean speed is along the slope; travel is the hull
+origin's displacement over 191 tick intervals (2.984375 s), sampled from 1.015625 to 4 s.
+The baseline is `1c9ca756`; the finite constrained response includes friction before integration.
+
+| substeps | slope | before round 1 mean m/s / origin mm | round 1 mean m/s / origin mm | capped row mean m/s / origin mm |
+|---|---|---|---|---|
+| 3 | 15° | 0.07870076 / 237.28697 | -0.00072019 / 0.25751 | -0.00070424 / 0.24828 |
+| 3 | 30° | 0.15339418 / 460.26197 | 0.00006440 / 4.20185 | 0.00006440 / 4.20185 |
+| 6 | 15° | 0.03898656 / 118.55792 | -0.00069655 / 0.23993 | -0.00069837 / 0.24219 |
+| 6 | 30° | 0.07613634 / 229.07600 | -0.00049954 / 0.92506 | -0.00049954 / 0.92506 |
+| 12 | 15° | 0.01919072 / 59.33666 | -0.00065957 / 0.22325 | -0.00065820 / 0.22129 |
+| 12 | 30° | 0.03777212 / 114.70390 | -0.00052659 / 0.50069 | -0.00052455 / 0.52907 |
+
+Over 5.015625–8 s, capped-row means at 3/6/12 substeps are
+-0.00000562/0.00000044/-0.00000198 m/s at 15°, with origin travel
+0.03731/0.00842/0.00122 mm. At 30° the means are
+0.00062495/0.00002645/0.00000758 m/s, with travel 4.54067/1.06578/0.32009 mm;
+round 1's travel was 4.54067/1.06578/0.32937 mm. This roughly inverse-square dependence on
+substep count remains **unexplained**; rotation, suspension and multi-contact discretization
+have not been isolated as its cause. Belts remain at zero, with no brake-sliding ticks.
+Origin and centre-of-mass travel differ during suspension settling: capped-row early COM travel
+at six substeps is -2.01428 mm at 15° and -0.92265 mm at 30°. The angularly locked rigid-hull
+witness isolates translational holding from that settling.
+
+The rigid witness uses a sphere with locked rotation and masses derived from each class
+drivetrain's brake rating: demand is half or twice one side's static capacity at each slope.
+It covers all four constructions, 1/3/6/12 substeps, 15°/30°, cached friction on and cleared,
+retaining normal warm start. One arm runs the awake driving pass. The 64 holding cases have
+peak speed at most 3.11e-9 m/s and three-second travel at most 5.72e-6 m (MEASURED); allowances
+derive from f32 velocity-increment and world-pose roundoff. The 64 overload cases slide and move
+downhill. Relax-only friction fails the holding travel invariant even with final speed held.
+
+**Contact cost.** Run the ignored
+`headless_test::track_scorecard::constrained_belt_relax_cost_with_two_workers` test alone with
+`scripts/serial-cargo test --release --lib --features dev_ui,bitprobe`, then
+`-- --ignored --nocapture --test-threads=1`. The probe installs two compute workers, which
+`TaskPool::scope` joins with its calling thread, and pulls one or eight independent tanks at full
+throttle for two seconds after settling, on broad slabs or separated loose pieces. Pass costs
+include normal and ordinary contact rows, normalized by belt-face point visits in that pass.
+Tick time includes the whole headless app update and its fixture bookkeeping. This is local
+release pricing, not a measurement on the hosted machine.
+
+MEASURED 2026-11-20 on the local Apple M4, Low Power Mode off, no compile running. Both builds
+use the release profile and `dev_ui,bitprobe`; `main` is `491eccdb`. The probe ran on both
+builds interleaved, three times each; each cell is the median, **main / capped row**:
+
+| support / tanks | belt visits, summed | biased µs/point | relax µs/point | contact ms/tick | whole update ms/tick |
+|---|---:|---:|---:|---:|---:|
+| slab / 1 | 10716 / 10836 | 0.675 / 1.108 | 1.696 / 2.002 | 0.198 / 0.264 | 1.120 / 1.156 |
+| slab / 8 | 86172 / 87084 | 0.611 / 1.045 | 1.680 / 2.036 | 1.542 / 2.095 | 4.087 / 4.260 |
+| debris / 1 | 32160 / 32832 | 0.076 / 0.447 | 0.207 / 0.446 | 0.071 / 0.229 | 0.929 / 1.085 |
+| debris / 8 | 256872 / 262842 | 0.069 / 0.393 | 0.179 / 0.428 | 0.497 / 1.686 | 2.406 / 3.374 |
+
+Eight tanks on debris add 0.968 ms/update, 1.40 times main (DERIVED from the MEASURED table).
+Main's update also runs two `bitprobe`-only conveyor scans the capped row deleted; timers inside
+them read 0.250 ms/tick on debris and 0.407 on slab with eight tanks (MEASURED), so a build
+without `bitprobe` widens each gap by that much. A sampling profile of the debris, eight-tank
+cell splits the friction hook's samples into the disk step (34%), the owner's face step with its
+exact re-snap (43%), searches at face changes (10%) and the rigid metric (9%) (MEASURED).
+Rows sharing a hull require sequential effects; independent owners inherit Avian 0.8.0's
+graph-colour dispatch, including its 64-constraint serial floor. The table prices that dispatch
+on this machine rather than assuming two workers parallelize it. Unpriced: the hosted two-core
+allocation, where the caller and two workers share two vCPUs; populations above eight tanks (the
+hosted server has run 30); and a rubble-heavy scene with few tanks, where the per-contact and
+per-body storage the fork adds is paid by every contact and body.
+
+**Capped-row visits (MEASURED 2026-11-20).** Temporary counters at `ContactMetric::minimum`
+entry and its third step counted both normal passes, excluding warm application. On a broad
+static slab, after one second settling, twelve-second runs gave:
+
+| command | point visits | third steps | rate (DERIVED) |
+|---|---:|---:|---:|
+| full throttle, straight | 124680 | 2 | 0.00160% |
+| full throttle, wide steer | 127020 | 8 | 0.00630% |
+| full throttle, tight steer | 124548 | 9 | 0.00723% |
+| neutral pivot | 128688 | 0 | 0% |
+
+`scripts/track-scorecard` counted 17/1661808 visits overall (0.00102%, DERIVED), including
+8/893052 on rubble and 0/199860 in the yard. Its highest individual line was slope:
+4/33312 (0.0120%, DERIVED), below the owner's 0.1% limit. The six `belt_friction_probe` cases
+(slab, pieces and house debris; pull and pivot) counted 0/2483460. No counter ships.
+The native passive grid runs each cell on the shipped exits and again with every visit forced to
+the second exit. In both, all 60 at-rest cells finished at or below 1.2e-27 J (13 exactly zero),
+and all 120 moving cells below their frictionless reference (MEASURED 2026-11-20). Forcing the
+second exit to the face mobility instead of the bare one fails the forced moving cells.
+
+The scorecard's sand above-limit assertion fails on both `main` (`7b046e22`, release) and
+this row (edit): the stated acceleration lower bound is -0.58139 m/s², observed acceleration
+and window travel are zero, and the assertion additionally requires positive travel.
+The other scorecard law lines pass. The existing slope expectation is unchanged.
 
 **The soft run.** Per side, one convex collider: the rest belt's outer outline across the shoe's
 measured faces, on `Layer::TrackBelt`, which meets only `Layer::Debris`. It is read as links of the
@@ -55,7 +177,7 @@ cannot show (`track::sim::apply_track_forces`), and one that finds the tank not 
 its timer (`track::sim::commit_drivetrains`): drive demand, a belt its brake does not hold, a brake meeting a
 stop beyond its capacity, every gripping patch at or past its budget, or a sampled support whose
 body is not static. A tank creeping past its grip limit keeps creeping:
-`contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits` judges the
+`contact_law_brakes_capture_below_moving_limits_and_move_above_total_resistance` judges the
 slope limits under production rest, mud at 17.0° against its 15.5° limit among them. A tank
 never rests on a support that can move by itself, another tank's hull among them, an admitted
 limit: Avian links bodies into an island only through solver contacts and joints
@@ -178,10 +300,18 @@ Known differences between the channels, none tuned:
   headings by three offsets, no run of 48 takes energy from the contact, nor any of the three from
   6 m that did; the fastest hull drives at 8.7 m/s and the largest point impulse on the tank is
   0.13 MN·s. With the exposed-face admission alone 8 of 48 did, the worst leaving at 165 m/s, and
-  before it 17 of 48, the worst at 319 m/s. With the read-back off, the exposed-face admission alone
-  still took energy in some tick of 7 of 12 such runs, up to 1.1 MJ, the worst tick's work mostly
-  the pinch's normal rows; with the band, none of the 12 did (MEASURED 2026-11-15, 57 t fixture
-  hull). What remains:
+  before it 17 of 48, the worst at 319 m/s. With the read-back off (the next tick's belt load from
+  delivered solver friction, since replaced by the in-solve exchange), the exposed-face admission
+  alone still took energy in some tick of 7 of 12 such runs, up to 1.1 MJ, the worst tick's work
+  mostly the pinch's normal rows; with the band, none of the 12 did (MEASURED 2026-11-15, 57 t
+  fixture hull). What remains:
+  - *Breakaway per search.* Decide each static row's breakaway once per interval from the
+    complete totals after the biased pass, kinetic through relaxation; the second exit only caps.
+  - *One builder of the transmission input.* `DriveTick::contact_only` builds its input without
+    the slew, the authority mask or the tick `dt` that `drivetrain_tick` applies. It runs when
+    physics steps with no driving pass before it; the driving systems wait for `AppState::Playing`
+    and physics does not, so a server still loading can hand it live axes (DERIVED from the
+    schedules, not reproduced). Build both through one function.
   - *One normal per convex pair* (#378). A slice still meets matter beside the shoe with its pair's
     one normal, and a hull-fixed face, the sprocket's and idler's wraps, records no rise: there a
     slice bears matter under its edge as the stop does, and the exposed-face admission alone keeps
@@ -189,10 +319,6 @@ Known differences between the channels, none tuned:
     and a solid's face wholly past it drops out of the clipped envelope
     (`world_contact::convex::clip_faces`) rather than saturate: a slice bears that matter at any
     depth, and other matter deeper in the belt than the reach.
-  - *The read-back* (#353). The hook moves each surface at belt speed, the solver takes that
-    friction against the hull's mass alone, and the transmission reads it back a tick late with no
-    slope (`stop_contacts::reactions`, `sim::feel_tick`). Any opposed rigid pair that remains gives
-    that friction an unbounded limit, and the belt speed runs away and drags the hull.
 - **The law within a step.** A contact's shares and the points that bear are read once, at the
   narrow phase, so its stiffness is exact for a common compression of its links, not for one piece
   retreating alone. The points split the force by `overlap + rest`, so the centre of pressure and
@@ -229,6 +355,12 @@ lateral pressure through a cubic profile.
 
 ## What was rejected, and why
 
+- **Prescribed conveyor with delayed billing.** It supplied unlimited momentum against finite
+  belt inertia. Bare belt inertia followed by a separate brake solve also let the hull creep
+  while the brake erased only belt motion. The constrained-response row replaces both.
+- **Exact per-point Newton minimization and a latched sliding regime.** Contact rows need bounded
+  work, and their final brake regime must depend on final totals. The capped row retains the
+  owner re-solve and response metric without a convergence panic or a second regime owner.
 - **The belt fully in the solver.** 46 segments and about 44 constraints per tank at rest. It passed
   the card's laws but for the slope hold, by under 1.3× the precision on speed. A hull is one body,
   so Avian's colouring puts half of those constraints in the overflow colour, solved on one thread

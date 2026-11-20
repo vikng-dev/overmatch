@@ -14,6 +14,7 @@ pub mod island_wake;
 pub mod required_state;
 pub mod rest_test;
 pub mod solver_cost;
+pub mod surface_motion;
 
 use avian3d::dynamics::solver::islands::RestTest;
 use bevy::prelude::*;
@@ -34,4 +35,5 @@ pub fn plugin(app: &mut App) {
     island_wake::plugin(app);
     compliance::plugin(app);
     solver_cost::plugin(app);
+    surface_motion::register();
 }

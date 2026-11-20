@@ -7,10 +7,6 @@ use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy::tasks::ComputeTaskPool;
 
-/// Graph-length readers only: surface-velocity writes leave every count invariant.
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VisitCounts;
-
 /// Last physics step's constraint visits, split by Avian's serial/parallel dispatch decision.
 #[derive(Resource, Default)]
 pub struct ContactVisits {
@@ -27,7 +23,6 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             PhysicsSchedule,
             record
-                .in_set(VisitCounts)
                 .after(SolverSystems::Restitution)
                 .before(SolverSystems::StoreContactImpulses)
                 .in_set(PhysicsStepSystems::Solver),
@@ -42,8 +37,7 @@ pub fn plugin(app: &mut App) {
                     .after(SubstepSolverSystems::SolveConstraints)
                     .before(SubstepSolverSystems::Relax),
                 record.after(SubstepSolverSystems::Relax),
-            )
-                .in_set(VisitCounts),
+            ),
         );
 }
 

@@ -301,6 +301,12 @@ pub struct DriverSense {
 }
 
 impl DriverSense {
+    /// The latest closed ledger sample's push; absent before any driven interval closes.
+    #[cfg(test)]
+    pub(crate) fn closed_push(&self) -> Option<[f32; 2]> {
+        self.samples.back().map(|sample| sample.push)
+    }
+
     /// An empty ledger averaging one cut of `shift_ticks`, and no fewer than [`MIN_SAMPLES`].
     pub(crate) fn for_cut(shift_ticks: NonZeroU8) -> Self {
         let window = usize::from(shift_ticks.get()).max(MIN_SAMPLES);
@@ -757,7 +763,6 @@ mod tests {
                 speed += (push - resist(push)) / MASS * DT;
                 reported = [
                     Some(HardReaction {
-                        belt: push * 0.25,
                         friction: FORWARD * push * 0.25,
                         grip: f32::INFINITY, // Fixture: ground that grips beyond any push.
                     }),
@@ -1670,7 +1675,6 @@ mod tests {
                 let mut inp = input(1.0, 0.0, [0.0; 2], pushed);
                 let hard = pushed.map(|push| {
                     Some(HardReaction {
-                        belt: push,
                         friction: FORWARD * push,
                         grip: f32::INFINITY, // Fixture: an obstacle gripping beyond any gear's pull.
                     })

@@ -87,7 +87,9 @@ fn mount(app: &mut App, body: Entity) {
     .add_systems(
         PhysicsSchedule,
         (
-            prepare.in_set(SolverSystems::PreSubstep),
+            prepare
+                .in_set(SolverSystems::PreSubstep)
+                .in_set(crate::contact_transfer::PrepareReading),
             restitution
                 .after(SolverSystems::Restitution)
                 .before(SolverSystems::Finalize),
@@ -251,7 +253,9 @@ fn read_solver(
         let tangent = if restitution {
             Vec2::ZERO
         } else {
-            (tangent_now - unapplied * at.last.1) / *dt
+            crate::avian_ext::surface_motion::tangent_impulse(
+                constraint, at.slot, at.last.1, unapplied,
+            ) / *dt
         };
         let [t1, t2] = constraint.tangent_directions();
         sides[at.side][at.path].add(

@@ -317,6 +317,37 @@ pub(crate) fn side_clutch_drivetrain() -> (FixtureConstruction, TransmissionPara
     )
 }
 
+/// Fixture: a contact-only tick with no operator, task service or engine and neutral axes;
+/// `condition` is the transmission's.
+pub(crate) fn unpowered_contact_tick(
+    fp: &DriveConstruction,
+    tp: &TransmissionParams,
+    transmission: TransmissionState,
+    speeds: [f32; 2],
+    condition: f32,
+    h: f32,
+) -> super::transmission::DriveTick {
+    super::transmission::DriveTick::contact_only(
+        fp,
+        tp,
+        super::transmission::DriveState {
+            transmission,
+            speeds,
+            phases: [0.0; 2],
+        },
+        super::drive::DriveTarget {
+            supply: DriveSupply {
+                control_authority: false,
+                task_rate: 0.0,
+                engine_in_action: false,
+                transmission_condition: condition,
+            },
+            intent: DriveIntent::Axes(DriveAxes::default()),
+        },
+        h,
+    )
+}
+
 pub(crate) fn class_drivetrains() -> [(FixtureConstruction, TransmissionParams); 4] {
     [
         (lab_fp(), lab_tp()),

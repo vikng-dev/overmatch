@@ -15,8 +15,7 @@ Subject: the game's server physics (rigid bodies, contacts, rest). Game state on
 Each patch takes one form, named in its section:
 
 - **hook**: a narrow extension point inside an upstream file; the law it serves lives in the game
-  (`src/avian_ext/`, one file per seam, installed by `avian_ext::plugin` after
-  `PhysicsPlugins`).
+  (`src/avian_ext/`, one file per seam). `avian_ext::plugin` installs it after `PhysicsPlugins`.
 - **module**: a self-contained fork file with a few call sites in upstream files.
 - **game-side**: no fork line; the game attaches through public schedule slots, components and
   resources.
@@ -24,7 +23,7 @@ Each patch takes one form, named in its section:
 - **dropped**: upstream 0.8.0 does it; the old witness runs against unpatched code.
 
 Patched sites in upstream files are tagged `OVERMATCH PATCH`. Fork lines are counted by `diff --minimal -ruN`
-of `src/` against the published crate: 875 in all (MEASURED), 797 in upstream files and 78 in the
+of `src/` against the published crate: 979 in all (MEASURED), 901 in upstream files and 78 in the
 fork-only `src/collision/narrow_phase/stationary_miss.rs`.
 
 Guards run as the game's own tests, each named in its patch's section.
@@ -677,3 +676,17 @@ color, never every constraint. Reset runs in `PhysicsStepSystems::First`.
 The engine's solver, diagnostics and slice-dispatch helper are pristine: 0 fork lines (MEASURED).
 The dispatch-contract tripwire is in the game module. `src/net/ram/avian_tests.rs` retains the
 pass-count, reset, serial/parallel and overflow assertions.
+
+## Finite moving surfaces
+
+Form: **hook**, for a game divergence; the finite-surface law has one game-side owner.
+`SolverBody::surface_scratch` carries cloneable adapter-owned transient state;
+`ContactConstraint::surface_coordinates` binds coefficients in relative contact velocity.
+`avian_ext::plugin` registers one callback. It dispatches warm start and both normal passes
+under graph-colored body ownership.
+Ordinary contacts retain stock friction. `SurfaceFrictionStage` owns the applied-impulse
+accumulator contract. No work tally or drivetrain law lives in the fork.
+
+Guards: native finite-surface energy and momentum witnesses, the production scheduling and
+parked-slab witnesses, and shared impulse-readback tests. Proposal, unsent:
+`upstream/avian-finite-moving-surfaces.md`.

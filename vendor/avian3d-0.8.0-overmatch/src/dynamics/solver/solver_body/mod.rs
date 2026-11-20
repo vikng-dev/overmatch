@@ -22,6 +22,34 @@ use super::Rot;
 use crate::prelude::ComputedAngularInertia;
 use crate::{SymmetricTensor, math::Vector, prelude::LockedAxes};
 
+/// OVERMATCH PATCH: cloneable adapter-owned scratch under graph-colored body ownership.
+pub trait SurfaceData: core::any::Any + Send + Sync + core::fmt::Debug {
+    /// Clone scratch when its solver body is cloned.
+    fn clone_box(&self) -> Box<dyn SurfaceData>;
+}
+
+/// OVERMATCH PATCH: transient, adapter-typed scratch; rebuilt before contact solving.
+#[derive(Debug)]
+pub struct SurfaceScratch(
+    /// The adapter's owned state.
+    pub Box<dyn SurfaceData>,
+);
+impl Clone for SurfaceScratch {
+    fn clone(&self) -> Self {
+        Self(self.0.clone_box())
+    }
+}
+
+/// OVERMATCH PATCH: a surface coordinate's coefficient in relative contact velocity.
+#[derive(Clone, Copy, Debug, PartialEq, Reflect)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct SurfaceCoordinate {
+    /// Adapter-defined scalar coordinate in its body's scratch.
+    pub index: usize,
+    /// World-space coefficient of this scalar in relative contact velocity.
+    pub direction: Vector,
+}
+
 // The `SolverBody` layout is inspired by `b2BodyState` in Box2D v3.
 
 /// Optimized rigid body state that the solver operates on,
@@ -51,7 +79,7 @@ use crate::{SymmetricTensor, math::Vector, prelude::LockedAxes};
 ///   quite confusing and error-prone, and would possibly require more branching.
 ///
 /// In addition to the delta position and rotation, we also store the linear and angular velocities
-/// and some bitflags. This all fits in 32 bytes in 2D or 56 bytes in 3D.
+/// and some bitflags. Optional moving-surface coordinates live beside this rigid-body state.
 ///
 /// The 2D data layout has been designed to support fast conversion to and from
 /// wide SIMD types via scatter/gather operations in the future when SIMD optimizations
@@ -62,6 +90,10 @@ use crate::{SymmetricTensor, math::Vector, prelude::LockedAxes};
 #[cfg_attr(feature = "serialize", reflect(Serialize, Deserialize))]
 #[reflect(Debug)]
 pub struct SolverBody {
+    /// OVERMATCH PATCH: owner-local coordinates for a custom surface friction law.
+    #[reflect(ignore)]
+    #[cfg_attr(feature = "serialize", serde(skip))]
+    pub surface_scratch: Option<SurfaceScratch>,
     /// The linear velocity of the body.
     ///
     /// 8 bytes in 2D and 12 bytes in 3D.
@@ -98,6 +130,7 @@ pub struct SolverBody {
 impl SolverBody {
     /// A dummy [`SolverBody`] for static bodies.
     pub const DUMMY: Self = Self {
+        surface_scratch: None,
         linear_velocity: Vector::ZERO,
         #[cfg(feature = "2d")]
         angular_velocity: 0.0,

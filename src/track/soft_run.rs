@@ -26,8 +26,8 @@
 //!   to the ground's under the same belt, which the sampled support carries: a limit (#354), as
 //!   the cap law is. The reading's limits are the design doc's
 //!   (`.agents/docs/design/track-model/track-contact.md`).
-//! - **Drivetrain.** A run carries its side's `BeltFace`, so the shared hook moves its surface at
-//!   belt speed and `stop_contacts::by_owner` reads its friction into the transmission.
+//! - **Drivetrain.** A run binds its side's `BeltFace` to the contact coordinate. The owner
+//!   commits the exchanged momentum; `stop_contacts::by_owner` reports traction to the Driver.
 //!
 //! Each run's laws come from a shared read of the contact graph, every run apart ([`read_runs`]);
 //! one short step publishes them in the step-local law store ([`write_runs`]). Both run in the

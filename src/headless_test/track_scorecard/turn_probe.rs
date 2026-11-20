@@ -179,8 +179,9 @@ fn record(bed: &Bed, z_c: f32, series: &mut Series, bins: Option<&mut [[f32; 4];
     let effect = world
         .get::<crate::track::sim::TrackGripEffect>(bed.tank)
         .expect("a tank carries its grip effect");
-    series.push("reaction_l", effect.belt_reaction[0]);
-    series.push("reaction_r", effect.belt_reaction[1]);
+    // The sampled ground load only; solver contacts reach the belts inside the substeps.
+    series.push("sampled_reaction_l", effect.belt_reaction[0]);
+    series.push("sampled_reaction_r", effect.belt_reaction[1]);
     series.push(
         "rpm",
         state.omega_e / crate::track::transmission::RPM_TO_RAD,

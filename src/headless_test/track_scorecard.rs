@@ -311,6 +311,7 @@ impl Bed {
             work.push(probe.assignments_tried);
             mechanical[0] += probe.mechanical_advances;
             mechanical[1] += probe.mechanical_rows;
+            // The committed solution's own search trials, 0 after a face step; not every visit's.
             mechanical[2] += probe.mechanical_assignments;
             mechanical[3] = mechanical[3].max(probe.max_substep_rows);
             mechanical[4] = mechanical[4].max(probe.max_substep_assignments);
@@ -551,8 +552,7 @@ impl Bed {
             .collect()
     }
 
-    /// Each side's solver contact over the last physics step, read as the drivetrain reads it
-    /// (`stop_contacts::reactions`) against the hull as it stands now.
+    /// Solver friction readout grouped by side, using the shipped face binding and transfer reader.
     fn hard_reactions(&mut self) -> [Option<crate::track::stop_contacts::HardReaction>; 2] {
         use crate::track::stop_contacts::{BeltFace, by_owner, reactions};
         use bevy::ecs::system::RunSystemOnce;
@@ -561,16 +561,12 @@ impl Bed {
             .world_mut()
             .run_system_once(
                 move |transfers: Res<crate::contact_transfer::ContactTransfers>,
-                      faces: Query<(&BeltFace, &ColliderOf)>,
-                      bodies: Query<(&Position, &Rotation)>| {
-                    let (position, rotation) = bodies.get(tank).expect("the tank is a rigid body");
+                      faces: Query<(&BeltFace, &ColliderOf)>| {
                     reactions(
                         by_owner(&transfers, &faces)
                             .get(&tank)
                             .map_or(&[], Vec::as_slice),
                         transfers.dt(),
-                        position.0,
-                        rotation.0,
                         &faces,
                     )
                 },
@@ -848,6 +844,8 @@ impl Bed {
 }
 
 /// Cost is an observation on the existing headless fixtures, never an acceptance condition.
+/// Run on demand: `OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless scripts/serial-cargo test
+/// --lib --features dev_ui,bitprobe drive_relocate_cost_probe -- --ignored --nocapture`.
 #[cfg(all(feature = "bitprobe", feature = "dev_ui"))]
 #[test]
 #[ignore = "the drivetrain relocation cost reading, run on demand"]
@@ -3005,15 +3003,10 @@ impl Straddle {
 /// the work of gravity, of the sampled support and of the solver's normal rows, and the most its
 /// engine can do (its greatest torque at its crank limit). The support's work is its forces on the
 /// hull over the hull's mean motion less what each belt paid it: the reaction the drivetrain landed
-/// the belt against (sprocket force less the belt's inertia force), less the solver's bill. Brakes,
-/// clutch and solver friction move energy among hull, belts and crank or spend it. Solver
-/// friction's bill reaches its belt a tick late (`sim::feel_tick`), so each tick charges the belt
-/// its own friction's bill at the belt speed the solver moved the surface at, and returns the bill
-/// it paid. The normal rows' work is booked as the solver did it: whether their push was owed is
-/// [`no_side_slice_bears_a_row_in_its_vacated_band`]'s. Fixture: [`Straddle`], 8 s at full pedal,
-/// long enough to cross the sills in first gear. Fails under a pinch, whose friction the read-back
-/// cannot settle within a tick (#353): `track-contact.md`, the side slices against standing
-/// matter.
+/// the belt against (sprocket work plus same-step solver work, less belt kinetic gain).
+/// Brakes, clutch and finite-surface friction move energy among hull, belts and crank or spend
+/// it. Normal-row work is booked as the solver applied it; the vacated-band witness owns
+/// whether it was owed. The belt side trusts the surface adapter's work tally. Fixture: `Straddle`, eight seconds at full pedal across the sills.
 #[cfg(feature = "bitprobe")]
 #[test]
 fn the_drivetrains_books_close_over_standing_matter() {
@@ -3039,9 +3032,7 @@ fn the_drivetrains_books_close_over_standing_matter() {
             + 0.5 * belt * belts.sides.iter().map(|s| s.speed * s.speed).sum::<f32>()
             + 0.5 * crank * omega * omega
     };
-    // `read`: the solver's bill each belt pays this tick (N); `bill`: its energy at the speeds the
-    // solver ran the belt surfaces at (J).
-    let (mut carried, mut read, mut bill, mut most) = (false, [0.0_f32; 2], 0.0, f32::MIN);
+    let (mut carried, mut most) = (false, f32::MIN);
     for tick in 0..8 * TICKS {
         let bed = &mut straddle.bed;
         let (before, com, held) = (bed.hull(), bed.center_of_mass(), energy(bed));
@@ -3061,8 +3052,7 @@ fn the_drivetrains_books_close_over_standing_matter() {
         let probe = (bed.app.world().get::<TrackGripEffect>(tank))
             .expect("a driving tank")
             .transmission_probe;
-        // Support work (J) is integrated sprocket work less belt kinetic gain and the
-        // previously billed hard reaction's work over the same time-centred belt travel.
+        // Sampled traction work is the belt's input work less its kinetic gain.
         let work = probe.belt_work;
         let paid: f64 = (0..2)
             .map(|i| {
@@ -3070,18 +3060,11 @@ fn the_drivetrains_books_close_over_standing_matter() {
                     f64::from(work.start_speeds[i]),
                     f64::from(probe.next_speeds[i]),
                 );
-                work.sprocket_work_j[i]
-                    - 0.5 * f64::from(belt) * (to * to - from * from)
-                    - f64::from(read[i]) * work.travel_m[i]
+                work.sprocket_work_j[i] - 0.5 * f64::from(belt) * (to * to - from * from)
             })
-            .sum();
-        read = bed
-            .hard_reactions()
-            .map(|hard| hard.map_or(0.0, |hard| hard.belt));
-        let charge = work.conveyor_work_j as f32;
-        let excess =
-            energy(bed) - held - (gravity + support + rows) * DT + paid as f32 - charge + bill;
-        bill = charge;
+            .sum::<f64>()
+            + work.solver_work_j;
+        let excess = energy(bed) - held - (gravity + support + rows) * DT + paid as f32;
         most = most.max(excess);
         carried |= straddle.carried();
         assert!(
@@ -3355,64 +3338,74 @@ fn slab_bed() -> Bed {
     bed
 }
 
-/// The drivetrain reads a loose piece's friction once, with its sign. On a hull carried wholly by
-/// solver contacts, the momentum change along its level heading, where gravity has no part, is
-/// the belts' friction plus the contact normals' push along it: a bump stop meeting the slab can
-/// take a tilted normal. So the readings' total equals the momentum change less that push, read
-/// from the same solver points. A tick's reaction is the solver's friction over the step
-/// before it (`stop_contacts`), so the readings of ticks 1..=N close the steps of ticks 0..N.
-/// A reading lost, doubled or one step out of line moves the balance by that step's friction, up
-/// to its grip limit times the step; the allowance is half the least such limit over the pull's
-/// steps with contact, the solver's Coulomb limit on both belts (`HardReaction::grip`) times the
-/// fixed step, so the balance catches such a fault at any step whose friction exceeds half its
-/// grip, whatever gear the Driver holds. Fixture: a pull short enough to stay on the slab.
+/// The shipped face binding and transfer reader report friction matching hull momentum minus
+/// the normals' push. Each delivered exchange is read once, with its sign, while
+/// solver-only support keeps sampled traction absent. Fixture: a one-second pull on a broad slab.
 #[test]
-fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
-    use crate::track::sim::TrackGripEffect;
+fn solver_friction_readout_matches_hull_momentum_on_loose_pieces() {
     let mut bed = slab_bed();
     let start = bed.hull();
     let forward = (start.forward() * Vec3::new(1.0, 0.0, 1.0)).normalize();
-    let (mut impulse, mut magnitude, mut momentum, mut pushed) = (0.0, 0.0, 0.0, 0.0);
+    let (mut impulse, mut magnitude, mut pushed) = (0.0, 0.0, 0.0);
     let mut least_grip = f32::INFINITY;
     let pull = TICKS;
-    for tick in 0..=pull {
-        momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward) - pushed;
+    let mut opened = None;
+    for tick in 0..pull {
+        let previous_hard = bed.hard_reactions();
+        // The driving pass opens this tick's ledger sample along the hull's tick-start heading,
+        // as `feel_tick` builds it.
+        let heading =
+            bevy::math::Affine3A::from_quat(bed.hull().rotation).transform_vector3(Vec3::NEG_Z);
         bed.tick(1.0, 0.0);
+        if let Some(heading) = opened.replace(heading) {
+            let closed = bed
+                .app
+                .world()
+                .get::<crate::track::driver::DriverSense>(bed.tank)
+                .unwrap()
+                .closed_push()
+                .expect("the preceding driven interval closes a ledger sample");
+            for (actual, hard) in closed.into_iter().zip(previous_hard) {
+                let expected = hard.map_or(0.0, |h| h.friction.dot(heading));
+                // DERIVED: solver-only support adds one f32 dot product to the closed sample.
+                let rounding = 8.0 * f32::EPSILON * (1.0 + expected.abs());
+                assert!(
+                    (actual - expected).abs() <= rounding,
+                    "Driver hard-contact ledger {actual} != solver readout {expected}"
+                );
+            }
+        }
         assert!(
             bed.spring_forces().is_empty(),
             "the sampled support carried the hull at tick {tick}"
         );
-        if tick < pull {
-            pushed += bed
-                .tank_solver_forces()
-                .iter()
-                .map(|(force, normal)| force.force.dot(*normal) * normal.dot(forward) * DT)
-                .sum::<f32>();
-            // A step with no solver contact moves no friction, so no fault there can move the
-            // balance; a side without one has no grip over the step.
-            let sides = bed.hard_reactions();
-            if sides.iter().any(Option::is_some) {
-                least_grip = least_grip.min(sides.iter().flatten().map(|side| side.grip).sum());
-            }
-        }
-        let effect = bed
-            .app
-            .world()
-            .get::<TrackGripEffect>(bed.tank)
-            .expect("a driven tank publishes its belt reaction");
-        if tick > 0 {
-            // Tick 0 reads the settle's last step.
-            let step = (effect.belt_reaction[0] + effect.belt_reaction[1]) * DT;
-            impulse += step;
-            magnitude += step.abs();
-        }
+        pushed += bed
+            .tank_solver_forces()
+            .iter()
+            .map(|(force, normal)| force.force.dot(*normal) * normal.dot(forward) * DT)
+            .sum::<f32>();
+        let sides = bed.hard_reactions();
+        if sides.iter().any(Option::is_some) {
+            least_grip = least_grip.min(sides.iter().flatten().map(|side| side.grip).sum());
+        } // A step without contact transfers no friction.
+        let step = sides
+            .iter()
+            .flatten()
+            .map(|side| side.friction.dot(forward))
+            .sum::<f32>()
+            * DT;
+        impulse += step;
+        magnitude += step.abs();
     }
+    let momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward) - pushed;
+    // DERIVED: half the least step's grip impulse detects a lost or doubled step
+    // whenever that step delivers more than half its grip.
     let allowance = 0.5 * least_grip * DT;
-    // DERIVED: each f32 addition errs by at most ε of a partial sum, which is under `magnitude`.
+    // DERIVED: each f32 addition errs by at most epsilon of a partial sum, below `magnitude`.
     let rounding = f32::EPSILON * pull as f32 * magnitude;
     println!(
-        "MEASURED belt impulse {impulse} N s, hull momentum change less the normals' push \
-         {momentum} N s, the push {pushed} N s, allowance {allowance} N s"
+        "MEASURED contact friction {impulse} N s, hull momentum less normals {momentum} N s, \
+         normal push {pushed} N s, allowance {allowance} N s"
     );
     assert!(
         rounding < allowance,
@@ -3420,12 +3413,11 @@ fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
     );
     assert!(
         momentum.abs() > allowance,
-        "the pull's {momentum} N s is within the allowance {allowance} N s: a lost or negated \
-         reading would close"
+        "the pull must exceed the allowance to detect a lost or negated reading"
     );
     assert!(
         (impulse - momentum).abs() < allowance,
-        "belts {impulse} N s against hull {momentum} N s, allowance {allowance} N s"
+        "friction {impulse} N s against hull {momentum} N s, allowance {allowance} N s"
     );
 }
 
@@ -3468,4 +3460,203 @@ fn track_scorecard() {
         .map(|line| line.id)
         .collect();
     assert!(failed.is_empty(), "law checks failed: {failed:?}");
+}
+
+/// Awake parked-slab observation with the shipped suspension and body, including its settling.
+/// Fixture: 15 and 30 degree rigid slabs, eight seconds, at several substep lengths.
+#[test]
+#[ignore = "parked-slab creep observation; run on demand"]
+fn parked_solver_slab_creep() {
+    for n in [3, 6, 12] {
+        for degrees in [15.0_f32, 30.0] {
+            let mut bed = Bed::on_ground(Some(base_ground()), flat());
+            let rotation = Quat::from_rotation_x(degrees.to_radians());
+            let downhill = rotation * Vec3::Z;
+            let top = Vec3::Y * 10.0;
+            let slab = bed.spawn_body(
+                top - rotation * Vec3::Y * 0.2,
+                Vec3::new(30.0, 0.4, 30.0),
+                crate::construction::breakage::piece_layers(),
+            );
+            bed.app.world_mut().entity_mut(slab).insert((
+                RigidBody::Static,
+                Rotation(rotation),
+                Transform::from_translation(top - rotation * Vec3::Y * 0.2).with_rotation(rotation),
+            ));
+            bed.app.world_mut().insert_resource(SubstepCount(n));
+            bed.place(top + rotation * Vec3::Y * 0.002, rotation);
+            bed.app
+                .world_mut()
+                .entity_mut(bed.tank)
+                .insert(SleepingDisabled);
+            bed.start();
+            let mut frames = Vec::new();
+            for _ in 0..8 * TICKS {
+                bed.tick(0.0, 0.0);
+                assert!(
+                    bed.spring_forces().is_empty(),
+                    "slab witness requires solver-only support"
+                );
+                let probe = bed
+                    .app
+                    .world()
+                    .get::<crate::track::sim::TrackGripEffect>(bed.tank)
+                    .unwrap()
+                    .transmission_probe;
+                frames.push((
+                    bed.hull(),
+                    bed.center_of_mass(),
+                    probe.next_speeds,
+                    probe.brakes_slide,
+                ));
+            }
+            for (begin, end) in [(TICKS, 4 * TICKS), (5 * TICKS, 8 * TICKS)] {
+                let window = &frames[begin..end];
+                let first = window.first().unwrap();
+                let last = window.last().unwrap();
+                let speed = window
+                    .iter()
+                    .map(|f| f.0.velocity.dot(downhill))
+                    .sum::<f32>()
+                    / window.len() as f32;
+                let travel = (last.0.position - first.0.position).dot(downhill);
+                let com_travel = (last.1 - first.1).dot(downhill);
+                let belt_peak = window
+                    .iter()
+                    .flat_map(|f| f.2)
+                    .map(f32::abs)
+                    .fold(0.0, f32::max);
+                let sliding = window.iter().filter(|f| f.3).count();
+                println!(
+                    "MEASURED solver-slab {degrees} deg n={n}, window {}..{} s: mean speed {speed} m/s, origin travel {travel} m, COM travel {com_travel} m, end angular {:?} rad/s, belt peak {belt_peak} m/s, brake sliding ticks {sliding}",
+                    (begin + 1) as f32 * DT,
+                    end as f32 * DT,
+                    last.0.angular
+                );
+            }
+        }
+    }
+}
+
+/// Fixture: independent shipped tanks on broad slabs or separated loose pieces. Two compute
+/// workers expose population dispatch; the release probe prices the whole contact passes.
+fn belt_cost_bed(population: usize, debris: bool) -> Bed {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let level = 0.402; // Fixture support top plus initial contact allowance, m.
+    let (_, template) = crate::tank::shipped_construction();
+    for owner in 0..population {
+        let offset = Vec3::X * (owner as f32 * 12.0); // Fixture: disjoint owners and supports.
+        if debris {
+            for side in [-1.0, 1.0] {
+                for along in [-2.0, 0.0, 2.0] {
+                    bed.spawn_piece(
+                        offset + Vec3::new(side * 1.5, 0.2, along),
+                        Vec3::new(1.5, 0.4, 1.5),
+                    );
+                }
+            }
+        } else {
+            bed.spawn_piece(offset + Vec3::Y * 0.201, Vec3::new(8.0, 0.4, 16.0));
+        }
+        if owner > 0 {
+            let at = offset + Vec3::Y * (level + bed.rest_y);
+            let world = bed.app.world_mut();
+            let mut commands = world.commands();
+            crate::tank::spawn_headless_tank(
+                &mut commands,
+                &template,
+                (
+                    Transform::from_translation(at),
+                    crate::eased_dynamic_body(),
+                    SleepingDisabled,
+                    crate::command::TankCommand::default(),
+                ),
+            );
+            world.flush();
+        }
+    }
+    bed.place(Vec3::Y * level, Quat::IDENTITY);
+    bed.app
+        .world_mut()
+        .entity_mut(bed.tank)
+        .insert(SleepingDisabled);
+    bed.start();
+    for _ in 0..TICKS {
+        bed.tick(0.0, 0.0);
+    }
+    bed
+}
+
+#[derive(Resource, Default)]
+struct BeltCostPoints(usize);
+
+fn count_belt_cost_points(
+    mut count: ResMut<BeltCostPoints>,
+    graph: Res<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
+    contacts: Res<avian3d::prelude::ContactGraph>,
+    faces: Query<(), With<crate::track::stop_contacts::BeltFace>>,
+) {
+    for row in graph.colors.iter().flat_map(|c| &c.contact_constraints) {
+        let (_, pair) = contacts
+            .get_by_id(row.contact_id)
+            .expect("a live constraint retains its contact pair");
+        if faces.contains(pair.collider1) || faces.contains(pair.collider2) {
+            count.0 += row
+                .points
+                .iter()
+                .filter(|p| p.tangent_part.is_some())
+                .count();
+        }
+    }
+}
+
+/// Whole contact passes, including normal rows, normalized by belt-face visits. Run alone in
+/// release so the global compute pool has two workers; tick time includes the whole app update.
+#[test]
+#[ignore = "release population cost; run alone with --release --ignored --nocapture --test-threads=1"]
+fn constrained_belt_relax_cost_with_two_workers() {
+    use bevy::tasks::{ComputeTaskPool, TaskPoolBuilder};
+    let pool = ComputeTaskPool::get_or_init(|| TaskPoolBuilder::new().num_threads(2).build());
+    assert_eq!(pool.thread_num(), 2, "run this observation alone");
+    for (population, debris) in [(1, false), (8, false), (1, true), (8, true)] {
+        let mut bed = belt_cost_bed(population, debris);
+        bed.app.init_resource::<BeltCostPoints>().add_systems(
+            SubstepSchedule,
+            count_belt_cost_points
+                .after(avian3d::dynamics::solver::schedule::SubstepSolverSystems::Relax),
+        );
+        let (mut biased, mut relax, mut update) = (0.0, 0.0, 0.0);
+        let ticks = 2 * TICKS; // Fixture: two seconds at full throttle after settling.
+        for _ in 0..ticks {
+            {
+                let world = bed.app.world_mut();
+                let mut commands =
+                    world.query_filtered::<&mut crate::command::TankCommand, With<Tank>>();
+                for mut command in commands.iter_mut(world) {
+                    command.throttle = 1.0;
+                    command.steer = 0.0;
+                }
+            }
+            let start = std::time::Instant::now();
+            bed.tick(1.0, 0.0);
+            update += start.elapsed().as_secs_f64() * 1e6;
+            let diagnostics = bed
+                .app
+                .world()
+                .resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+            biased += diagnostics.solve_constraints.as_secs_f64() * 1e6;
+            relax += diagnostics.relax_velocities.as_secs_f64() * 1e6;
+        }
+        let points = bed.app.world().resource::<BeltCostPoints>().0;
+        assert!(points > 0, "pricing requires belt-face contacts");
+        println!(
+            "MEASURED belt-cost population={population} debris={debris}: biased_us_tick={} relax_us_tick={} biased_us_point={} relax_us_point={} update_us_tick={} visits={points}; optimized={}, two compute workers, full throttle",
+            biased / ticks as f64,
+            relax / ticks as f64,
+            biased / points as f64,
+            relax / points as f64,
+            update / ticks as f64,
+            !cfg!(debug_assertions)
+        );
+    }
 }

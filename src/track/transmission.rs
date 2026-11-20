@@ -970,8 +970,7 @@ impl TransmissionState {
         Self::with_crank_speed(tp.engine.idle_rpm * RPM_TO_RAD)
     }
 
-    /// A state at rest with its crank stopped: the fixture for tests whose subject is not the
-    /// transmission (replication scope, probe layout, HUD formatting).
+    /// Fixture: a parked state at rest with its crank stopped.
     #[cfg(test)]
     pub(crate) fn stopped() -> Self {
         Self::with_crank_speed(0.0)
@@ -1558,7 +1557,9 @@ fn passive_rows(
                 .expect("a constructed mean stop has its own admitted rating"),
         ) * f64::from(inp.dt);
         rows.push(Row {
-            jacobian: Coupling::Stop(Output::Mean).jacobian(0.0, 0.0).to_vec(),
+            jacobian: super::block::Inline::from_slice(
+                &Coupling::Stop(Output::Mean).jacobian(0.0, 0.0),
+            ),
             target: 0.0,
             bounds: symmetric(rating * f64::from(tp.brake_static_factor)),
             dynamic: Some(symmetric(rating)),
@@ -1591,7 +1592,7 @@ fn passive_rows(
                 };
                 let lever = st.park || (!controls.service && !inner);
                 rows.push(Row {
-                    jacobian: coupling.jacobian(0.0, 0.0).to_vec(),
+                    jacobian: super::block::Inline::from_slice(&coupling.jacobian(0.0, 0.0)),
                     target: 0.0,
                     bounds: bounds(if lever {
                         capacity * f64::from(tp.brake_static_factor)
@@ -1653,18 +1654,35 @@ fn coupling_budget(
     }
 }
 
-/// One block owns the crank and both belts. Ground slopes augment belt inertia; their affine
-/// offsets preserve the supplied starting reactions. Every row impulse is billed to every
-/// coordinate of its Jacobian, including the crank's steering work.
-fn advance_rows(
+/// The crank and belts share bounded rows; contact impulses enter their free momenta.
+#[derive(Clone, Debug)]
+pub(crate) struct MechanicalRows {
+    pub(crate) speeds: Vec<super::block::Speed>,
+    pub(crate) rows: Vec<super::block::Row>,
+    pub(crate) limits: Vec<super::block::ImpulseLimit>,
+    clutches: Vec<usize>,
+    steering: Option<usize>,
+    stops: std::ops::Range<usize>,
+}
+
+impl MechanicalRows {
+    pub(crate) fn solve(&self, impulses: [f64; 2], warm: &mut WarmStart) -> super::block::Solution {
+        let mut speeds: super::block::Inline<_> = self.speeds.iter().copied().collect();
+        for (speed, impulse) in speeds[1..].iter_mut().zip(impulses) {
+            speed.free_impulse += impulse;
+        }
+        super::block::solve_limited(&speeds, &self.rows, &self.limits, warm)
+    }
+}
+
+fn prepare_rows(
     fp: &DriveConstruction,
     tp: &TransmissionParams,
-    st: &mut TransmissionState,
+    st: &TransmissionState,
     controls: &Controls,
     tau_free: f32,
-    warm: &mut WarmStart,
-) -> (TransmissionReport, f32, f32) {
-    use super::block::{Bounds, ImpulseLimit, Row, Speed, solve_limited};
+) -> MechanicalRows {
+    use super::block::{Bounds, ImpulseLimit, Row, Speed};
     let inp = &controls.input;
     let dt = f64::from(inp.dt);
     let k = f64::from(controls.ratio / tp.sprocket_radius);
@@ -1719,7 +1737,9 @@ fn advance_rows(
                 let upper = if open { 0.0 } else { capacity };
                 clutches.push(rows.len());
                 rows.push(Row {
-                    jacobian: coupling.jacobian(dir * k, signed_steer).to_vec(),
+                    jacobian: super::block::Inline::from_slice(
+                        &coupling.jacobian(dir * k, signed_steer),
+                    ),
                     target: 0.0,
                     bounds: Bounds { lower, upper },
                     dynamic: None,
@@ -1729,7 +1749,9 @@ fn advance_rows(
             Coupling::Steering => {
                 steering = Some(rows.len());
                 rows.push(Row {
-                    jacobian: coupling.jacobian(dir * k, signed_steer).to_vec(),
+                    jacobian: super::block::Inline::from_slice(
+                        &coupling.jacobian(dir * k, signed_steer),
+                    ),
                     target: 0.0,
                     bounds: symmetric(steering_capacity),
                     dynamic: None,
@@ -1740,7 +1762,7 @@ fn advance_rows(
     let capacity = f64::from(tp.brake_capacity_n) * dt;
     let first_stop = rows.len();
     rows.extend(passive_rows(tp, st, controls, capacity));
-    let mut stops = first_stop..rows.len();
+    let stops = first_stop..rows.len();
     if controls.ceiling
         && !controls.clutch_open
         && !controls.mean_hold
@@ -1753,7 +1775,7 @@ fn advance_rows(
         }) {
             let weights = output.weights();
             rows.push(Row {
-                jacobian: vec![0.0, dir * weights[0], dir * weights[1]],
+                jacobian: smallvec::smallvec![0.0, dir * weights[0], dir * weights[1]],
                 target: f64::from(tp.engine.crank_limit_rpm * RPM_TO_RAD) / k,
                 bounds: Bounds {
                     lower: -capacity / weights[0].max(weights[1]),
@@ -1764,18 +1786,39 @@ fn advance_rows(
         }
     }
 
-    let solved = solve_limited(
-        &speeds,
-        &rows,
-        &[ImpulseLimit {
-            coefficients: rows.iter().map(|r| r.jacobian[0]).collect(),
-            bounds: Bounds {
-                lower: floor_impulse,
-                upper: over_impulse,
-            },
-        }],
-        warm,
-    );
+    let limits = vec![ImpulseLimit {
+        coefficients: rows.iter().map(|r| r.jacobian[0]).collect(),
+        bounds: Bounds {
+            lower: floor_impulse,
+            upper: over_impulse,
+        },
+    }];
+    MechanicalRows {
+        speeds,
+        rows,
+        limits,
+        clutches,
+        steering,
+        stops,
+    }
+}
+
+fn finish_rows(
+    st: &mut TransmissionState,
+    controls: &Controls,
+    mechanical: &MechanicalRows,
+    solved: &super::block::Solution,
+) -> (TransmissionReport, f32, f32) {
+    let MechanicalRows {
+        rows,
+        clutches,
+        steering,
+        stops,
+        ..
+    } = mechanical;
+    let mut stops = stops.clone();
+    let inp = &controls.input;
+    let dt = f64::from(inp.dt);
     let mut forces = [0.0_f64; 2];
     for (row, outcome) in rows.iter().zip(&solved.rows) {
         for (force, coefficient) in forces.iter_mut().zip(&row.jacobian[1..]) {
@@ -1810,6 +1853,10 @@ fn advance_rows(
     if locked && controls.propulsive >= dead() {
         st.launch = LaunchState::Locked;
     }
+    assert!(
+        solved.speeds.iter().all(|v| (*v as f32).is_finite()),
+        "the solved crank and belt speeds must fit their finite public representation"
+    );
     st.omega_e = solved.speeds[0] as f32;
     let driving = clutches.iter().any(|&i| solved.rows[i].impulse < 0.0);
     let next_speeds = [solved.speeds[1] as f32, solved.speeds[2] as f32];
@@ -1857,6 +1904,19 @@ fn advance_rows(
         clutch_torque as f32,
         steer_force,
     )
+}
+
+fn advance_rows(
+    fp: &DriveConstruction,
+    tp: &TransmissionParams,
+    st: &mut TransmissionState,
+    controls: &Controls,
+    tau_free: f32,
+    warm: &mut WarmStart,
+) -> (TransmissionReport, f32, f32) {
+    let mechanical = prepare_rows(fp, tp, st, controls, tau_free);
+    let solved = mechanical.solve([0.0; 2], warm);
+    finish_rows(st, controls, &mechanical, &solved)
 }
 
 fn requests_other_ladder(command: f32, reverse: bool) -> bool {
@@ -2179,16 +2239,27 @@ fn advance_shift_window(st: &mut TransmissionState) -> bool {
     shifting
 }
 
-/// Advance one owner's mechanical state under tick-constant orders and affine sampled loads.
-/// The same operation serves live substeps, resting trials and the sandbox.
-pub(crate) fn advance(
+/// One interval's free momentum and bounded rows, shared by live contacts and resting trials.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedDrive {
+    pub(crate) mechanical: MechanicalRows,
+    controls: Controls,
+    power: f32,
+    #[cfg(feature = "bitprobe")]
+    omega_pre: f32,
+    #[cfg(feature = "bitprobe")]
+    ratio: f32,
+    #[cfg(feature = "bitprobe")]
+    probe: TransmissionProbe,
+}
+
+pub(crate) fn prepare_advance(
     fp: &DriveConstruction,
     tp: &TransmissionParams,
-    state: &mut DriveState,
+    state: &DriveState,
     orders: &Orders,
-    warm: &mut WarmStart,
     h: f32,
-) -> TransmissionReport {
+) -> PreparedDrive {
     assert!(
         h.is_finite() && h > 0.0,
         "a mechanical substep has a positive finite duration"
@@ -2203,12 +2274,13 @@ pub(crate) fn advance(
             + reference.reaction_slopes[i] * (state.speeds[i] - reference.speeds[i])
     });
     let inp = &controls.input;
-    let st = &mut state.transmission;
+    let st = &state.transmission;
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
     #[cfg(feature = "bitprobe")]
     let mut probe = input_probe(st, inp, mean, (inp.speeds[0] - inp.speeds[1]) * 0.5);
     let ratio = tp.ratio(st.reverse, st.gear);
     let k = ratio / tp.sprocket_radius;
+    #[cfg(feature = "bitprobe")]
     let omega_pre = st.omega_e;
     let (torque, power) = crank_free_torque(
         tp,
@@ -2223,11 +2295,45 @@ pub(crate) fn advance(
         #[cfg(feature = "bitprobe")]
         &mut probe,
     );
-    let (mut report, clutch_torque, steer_force) =
-        advance_rows(fp, tp, st, &controls, torque, warm);
+    let mechanical = prepare_rows(fp, tp, st, &controls, torque);
+    PreparedDrive {
+        mechanical,
+        controls,
+        power,
+        #[cfg(feature = "bitprobe")]
+        omega_pre,
+        #[cfg(feature = "bitprobe")]
+        ratio,
+        #[cfg(feature = "bitprobe")]
+        probe,
+    }
+}
+
+pub(crate) fn finish_advance(
+    tp: &TransmissionParams,
+    state: &mut DriveState,
+    prepared: &PreparedDrive,
+    solved: &super::block::Solution,
+    h: f32,
+) -> TransmissionReport {
+    let PreparedDrive {
+        ref mechanical,
+        controls,
+        power,
+        #[cfg(feature = "bitprobe")]
+        mut probe,
+        ..
+    } = *prepared;
+    let inp = &controls.input;
+    let st = &mut state.transmission;
+    let (mut report, clutch_torque, steer_force) = finish_rows(st, &controls, mechanical, solved);
     report.power_available = power;
     #[cfg(feature = "bitprobe")]
     {
+        let PreparedDrive {
+            omega_pre, ratio, ..
+        } = *prepared;
+        let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
         force_probe(
             tp,
             inp,
@@ -2249,7 +2355,7 @@ pub(crate) fn advance(
         probe.direction = controls.dir;
         probe.shaft_speed = controls.dir * mean;
         probe.gear_reduction = ratio;
-        probe.k = k;
+        probe.k = ratio / tp.sprocket_radius;
         probe.omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
         probe.omega_floor = if st.launch != LaunchState::Locked && controls.propulsive >= dead() {
             tp.launch_omega(controls.propulsive)
@@ -2260,7 +2366,7 @@ pub(crate) fn advance(
         probe.shifting = controls.shifting;
         probe.engaged = st.clutch != ClutchState::Out;
         probe.tau_c = clutch_torque;
-        probe.clutch_force_n = controls.dir * k * clutch_torque;
+        probe.clutch_force_n = controls.dir * probe.k * clutch_torque;
         probe.steering_force_n = steer_force;
         probe.lambda = steer_force;
         probe.j = [0.5, -0.5];
@@ -2278,12 +2384,25 @@ pub(crate) fn advance(
         report.bitprobe = probe;
     }
     #[cfg(not(feature = "bitprobe"))]
-    let _ = (omega_pre, clutch_torque, steer_force);
+    let _ = (tp, inp, clutch_torque, steer_force);
     for (phase, speed) in state.phases.iter_mut().zip(state.speeds) {
         *phase += f64::from(speed * h);
     }
     state.speeds = report.next_speeds;
     report
+}
+
+pub(crate) fn advance(
+    fp: &DriveConstruction,
+    tp: &TransmissionParams,
+    state: &mut DriveState,
+    orders: &Orders,
+    warm: &mut WarmStart,
+    h: f32,
+) -> TransmissionReport {
+    let prepared = prepare_advance(fp, tp, state, orders, h);
+    let solved = prepared.mechanical.solve([0.0; 2], warm);
+    finish_advance(tp, state, &prepared, &solved, h)
 }
 
 #[cfg(test)]
