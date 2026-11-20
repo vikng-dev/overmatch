@@ -1331,6 +1331,12 @@ mod tests {
                 CollisionLayers::new([Layer::TrackSide], LayerMask::ALL),
             ),
         ] {
+            // The cases rest on the shipped piece layers: the near collider is refused, and the
+            // permitting one would be admitted, so a pooled or one-way reach has something to find.
+            let target = crate::construction::breakage::piece_layers();
+            let permitting = CollisionLayers::new([Layer::Vehicle], LayerMask::ALL);
+            assert!(!source.interacts_with(target), "{case}: premise");
+            assert!(permitting.interacts_with(target), "{case}: premise");
             let mut app = settling(GRAVITY);
             slab(&mut app, 0.0);
             let rubble = piece(&mut app, Vec3::Y * (SIDE / 2.0));
@@ -1342,7 +1348,7 @@ mod tests {
                 ChildOf(body),
                 Transform::from_xyz(0.0, 0.0, 2.0),
                 Collider::cuboid(SIDE, SIDE, SIDE),
-                CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+                permitting,
             ));
             // Fixture: enough fixed updates to cross the cube, including its far face.
             for update in 0..16 {
@@ -1445,7 +1451,7 @@ mod tests {
     /// this static.
     #[test]
     fn a_spinning_or_accelerating_body_meets_no_frozen_piece() {
-        // Fixture: a 4 m bar at 15 rad/s, its end 30 m/s across the piece; a 0.6 m body at rest
+        // Fixture: a 4 m bar at 15 rad/s, its end 30 m/s across the piece; a [`mover`] at rest
         // 0.1 m off under 2000 m/s², which its first step carries into the piece with no contact.
         let cases: [(&str, fn(&mut App) -> Entity); 2] = [
             ("a spinning bar", |app| {
@@ -1463,7 +1469,7 @@ mod tests {
                     .id()
             }),
             ("an accelerating body", |app| {
-                let at = Vec3::new(1.9 - SIDE / 2.0 - 0.1 - 0.3, SIDE * 0.75, 0.0);
+                let at = Vec3::new(1.9 - SIDE / 2.0 - 0.1 - MOVER_WIDTH / 2.0, SIDE * 0.75, 0.0);
                 mover(app, at, 0.0)
                     .insert((
                         ConstantLinearAcceleration(Vec3::X * 2000.0),
