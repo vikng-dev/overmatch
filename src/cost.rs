@@ -199,6 +199,11 @@ impl<E> Default for Trace<E> {
 }
 
 impl<E> Trace<E> {
+    /// The number the next row takes.
+    pub(crate) fn next_tick(&self) -> u64 {
+        self.tick + 1
+    }
+
     /// Numbers and keeps this tick's row; the caller writes its `collector_us`.
     pub(crate) fn push(&mut self, sample: TickSample, extra: E) -> &mut Row<E> {
         self.tick += 1;

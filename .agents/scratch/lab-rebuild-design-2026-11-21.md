@@ -165,12 +165,16 @@ Three things can differ between two runs of one binary; each gets a named owner.
    identity already, its ordinal in the id-sorted instance list (`scatter.rs:17`, `:48`); whether
    root entity order follows it on the server was not checked. If `compare` ever attributes a
    split there, that ordinal is the key.
-3. **Input arrival.** A real client's input crosses UDP. Each row records the parsed throttle and
-   steer. `compare` on two runs of one binary and recipe checks inputs first, then every hull and
-   structure field, keyed by tick from spawn and by construction and chunk, never by entity. It
-   reports one of: equal; inputs differ at tick N (outside input, the pair is not a replay); inputs
-   equal and state differs at tick M, field F (an order dependence on the server: a finding against
-   the game, with its tick).
+3. **Input arrival.** A real client's input crosses UDP, so each run's throttle reaches the server
+   on its own tick (MEASURED: ticks 277 and 282 in two runs of one recipe). Each row records the
+   parsed throttle and steer. `compare` on two runs of one binary and recipe keys each run's rows
+   from its onset, the first tick its server parsed a nonzero drive, and at the end by
+   construction and chunk, never by entity. The keying holds while the hull rests before input:
+   the rows agree tick for tick from spawn, and the later run held the earlier one's last row
+   until its own onset. It reports both onsets and one of: state differs before input at tick N;
+   equal; inputs differ N ticks after onset (outside input, the pair is not a replay); state
+   differs N ticks after onset, field F, or at an unequal end (the same inputs gave different
+   state: a finding against the game, with its tick).
 
 Replay is then a checked property with an attributed failure, not a flag someone reads. `compare`
 never gates a landing and holds no stored result.

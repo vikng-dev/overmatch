@@ -107,7 +107,7 @@ const STOP_TOLERANCE_M: f32 = 0.01;
 
 /// DERIVED from the construction frame: grade is its zero-height plane, m, the plane the construction stands on (a construction spawns with its
 /// frame's origin on the ground, its foundation below). A chunk wholly below it is buried.
-const GRADE_M: f32 = 0.0;
+pub(crate) const GRADE_M: f32 = 0.0;
 /// Resolution: on-grade tolerance, m, for baked corners rounded off the cutting plane.
 const ON_GRADE_M: f32 = 1e-4;
 

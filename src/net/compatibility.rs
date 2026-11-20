@@ -112,6 +112,17 @@ impl Compatibility {
         })
     }
 
+    /// The provenance line each binary logs once at startup: this build's record and the cargo
+    /// features (`build.rs`) and assertions it was compiled with (`scripts/debris-lab` reads it).
+    pub(super) fn build_line() -> String {
+        format!(
+            "build: {} features={} debug_assertions={}",
+            Self::local().text(),
+            env!("OVERMATCH_FEATURES"),
+            cfg!(debug_assertions)
+        )
+    }
+
     /// The netcode handshake tag: the record's text, hashed.
     pub(crate) fn tag(&self) -> u64 {
         fnv1a_64(FNV_OFFSET_BASIS, self.text().as_bytes())

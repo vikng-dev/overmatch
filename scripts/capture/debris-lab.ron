@@ -1,0 +1,30 @@
+// A capture plan (`dev_capture::plan::CapturePlan`) for the building-debris model's lab (game
+// state only): the driving client's view of a ram pass. `scripts/debris-lab run` hands it to
+// `collapse.py --ram --clip`, whose client runs it in the run's folder on a hidden window.
+(
+    frames: (
+        // The run folder's frames/ram-<time>s.png.
+        out: "frames/ram.png",
+        // Resolution: eight frames a second for six seconds, a pass at a watchable pace; the first
+        // falls a second after the approach opens them.
+        at: [
+            0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875,
+            1.0, 1.125, 1.25, 1.375, 1.5, 1.625, 1.75, 1.875,
+            2.0, 2.125, 2.25, 2.375, 2.5, 2.625, 2.75, 2.875,
+            3.0, 3.125, 3.25, 3.375, 3.5, 3.625, 3.75, 3.875,
+            4.0, 4.125, 4.25, 4.375, 4.5, 4.625, 4.75, 4.875,
+            5.0, 5.125, 5.25, 5.375, 5.5, 5.625, 5.75, 5.875,
+            6.0,
+        ],
+        // Resolution: bounded evidence; the client renders on the server's machine.
+        size: (1280, 720),
+        scale_factor: 1.0,
+        ui: false,
+        gizmos: false,
+        // Taste: clip framing, metres from the tank's root in the approach's frame: behind and to
+        // the right of the pass, high enough to see over the hull.
+        camera: Follow(offset: (9.0, 6.0, 14.0)),
+        // Taste: the first frame shows the hull a second and a half short of the house.
+        lead_s: 1.5,
+    ),
+)

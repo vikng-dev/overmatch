@@ -43,6 +43,8 @@ import time
 from online_cost import ANSI
 
 ROOT = Path(__file__).resolve().parents[2]
+# The binaries this script builds and runs unless --bin names others.
+BIN = ROOT / "target/debug"
 # Resolution: five wall seconds suppress single-frame stalls in the sustained-speed report.
 SUSTAINED_S = 5
 # Resolution: trigger sampling only for a sustained deficit of at least 10%, beyond pacing jitter.
@@ -500,12 +502,13 @@ def run_match(args, out, recipe):
 
 
 def ram_recipe(path):
-    """Operator route choices; the server derives speed and run-up from its admitted tank data."""
+    """Operator route choices; the server derives speed and run-up from its admitted tank data, and
+    admits the structure reading's labelled in_place_m (src/net/ram.rs, Recipe)."""
     value = json.loads(path.read_text())
-    keys = {"instance", "heading_deg", "runup_margin", "minimum_speed_fraction", "approach_s", "deadline_s", "settle_s"}
+    keys = {"instance", "heading_deg", "runup_margin", "minimum_speed_fraction", "approach_s", "deadline_s", "settle_s", "in_place_m"}
     if not isinstance(value, dict) or set(value) != keys or not isinstance(value["instance"], str) or not value["instance"]:
         raise ValueError(f"{path}: expected ram recipe fields {sorted(keys)} and a nonempty instance")
-    for key in keys - {"instance"}:
+    for key in keys - {"instance", "in_place_m"}:
         v = value[key]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
             raise ValueError(f"{path}: {key} must be finite")
@@ -567,6 +570,11 @@ def finite(value, field):
     except OverflowError:
         pass
     raise ValueError(f"invalid {field}: expected a finite number")
+
+
+def percentile(ordered, q):
+    """The nearest-rank `q` percentile of an ascending, nonempty list, 0 < q <= 1."""
+    return ordered[math.ceil(q*len(ordered)) - 1]
 
 
 def read_tick_samples(batches, tanks, ticks=None, sends=None):
@@ -634,12 +642,23 @@ def ram_rows(text, recipe):
             ticks, sends = read_tick_samples([ram], 1, ticks, sends)
             if not isinstance(ram["pieces"]["records"], list):
                 raise ValueError("invalid pieces.records")
+            for tick in ticks[len(ticks) - len(ram["ticks"]):]:
+                hull = tick["hull"]
+                for field in ("forward_m_s", "along_m"):
+                    finite(hull[field], f"hull.{field}")
+                if tick["tick"] == 1:
+                    if hull["forward_change_m_s"] is not None:
+                        raise ValueError("invalid hull.forward_change_m_s: the first row has no previous row")
+                else:
+                    finite(hull["forward_change_m_s"], "hull.forward_change_m_s")
             plan, impact = ram["plan"], ram["impact"]
             if plan is not None:
                 for field in ("runup_m", "governed_m_s", "minimum_m_s"):
                     finite(plan[field], f"plan.{field}")
                     if plan[field] < 0:
                         raise ValueError(f"invalid plan.{field}: expected nonnegative distance or speed")
+                # A position along the heading, of either sign.
+                finite(plan["clear_m"], "plan.clear_m")
                 for field, size in (("spawn", 3), ("rotation", 4)):
                     if not isinstance(plan[field], list) or len(plan[field]) != size:
                         raise ValueError(f"invalid plan.{field}: expected {size} coordinates")
@@ -650,6 +669,8 @@ def ram_rows(text, recipe):
             if impact is not None:
                 if isinstance(impact["tick"], bool) or not isinstance(impact["tick"], int) or not 0 < impact["tick"] <= len(ticks):
                     raise ValueError("invalid impact.tick: expected a captured tick")
+                if impact["speed_m_s"] is None:
+                    raise RuntimeError("ram contact on the capture's first tick: no run-up speed was measured")
                 for field in ("speed_m_s", "normal_speed_m_s"):
                     finite(impact[field], f"impact.{field}")
             rows.append(row)
@@ -765,6 +786,21 @@ def match_tick_summary(rows, recipe):
                 over_budget_ticks=[tick_attribution(t) for t in ticks if t["tick_us"] > t["dt_s"]*1e6])
 
 
+HULL_DEFINITIONS = dict(
+    forward_change_m_s="a row's forward speed minus the previous row's, m/s; no m/s² reading",
+    min_forward_m_s="the least forward speed from the contact tick on, m/s",
+    largest_forward_change_m_s="the one-tick forward speed change of greatest size from the contact tick on, signed, m/s",
+    crossing_s="from the contact tick to the first tick the hull's position along the recipe heading reaches plan.clear_m "
+               "(the construction's far bound plus the tank's stance reach, so its rear has cleared); null when the capture ends first",
+    stall_s="seconds from the contact tick on with forward speed <= 0",
+    structure="the struck construction at the capture's end (src/net/ram/structure.rs): a chunk's displacement is the "
+              "farthest any of its corners lies from where it was built; in place is a chunk a body still carries with "
+              "its displacement within recipe.in_place_m; the share counts volume built above grade; displacement_m is "
+              "the volume-weighted mean displacement over carried_m3, the volume built above grade that a body still "
+              "carries, null when none is; the opening is the departed area of plan.panel's face, clipped at grade",
+)
+
+
 def ram_summary(text, recipe):
     rows, ticks, sends, last = ram_rows(text, recipe)
     if last is None:
@@ -778,6 +814,14 @@ def ram_summary(text, recipe):
         raise RuntimeError(f"ram observation invalidated: {last['done']}")
     if not impact:
         raise RuntimeError("completed ram has no measured impact")
+    structure = last["structure"]
+    try:
+        for field in ("above_grade_m3", "in_place_m3", "in_place_share", "carried_m3", "opening_m2"):
+            finite(structure[field], f"structure.{field}")
+        if structure["displacement_m"] is not None:
+            finite(structure["displacement_m"], "structure.displacement_m")
+    except (ValueError, KeyError, TypeError) as error:
+        raise RuntimeError(f"completed ram has no structure reading: {error}") from error
     window = [t for t in ticks if t["tick"] >= impact["tick"]]
     if not window:
         raise RuntimeError("ram has no measured contact window")
@@ -792,9 +836,16 @@ def ram_summary(text, recipe):
     ordered = sorted(t["tick_us"] for t in window)
     send_us = sum(s["us"] for s in sends if window[0]["tick"] <= s["tick"] <= window[-1]["tick"])
     worst = max(window, key=lambda t: t["tick_us"])
+    hulls = [t["hull"] for t in window]
+    crossing = next((t["tick"] for t in window if t["hull"]["along_m"] >= plan["clear_m"]), None)
     return dict(recipe=recipe, plan=plan, impact=impact, end=last["done"],
+                min_forward_m_s=min(h["forward_m_s"] for h in hulls),
+                largest_forward_change_m_s=max((h["forward_change_m_s"] for h in hulls), key=abs),
+                crossing_s=None if crossing is None else (crossing - impact["tick"])*dt,
+                stall_s=sum(h["forward_m_s"] <= 0 for h in hulls)*dt,
+                structure=structure, definitions=HULL_DEFINITIONS,
                 first_tick=window[0]["tick"], last_tick=window[-1]["tick"], window_s=len(window)*dt,
-                worst_tick=worst, p99_us=ordered[math.ceil(0.99*len(ordered))-1],
+                worst_tick=worst, p99_us=percentile(ordered, 0.99),
                 worst_tick_attribution=tick_attribution(worst),
                 worst_capture_tick_attribution=tick_attribution(max(ticks, key=lambda t: t["tick_us"])),
                 # Include approach ticks too: the attribution gate applies to the whole capture.
@@ -811,7 +862,7 @@ def ram_summary(text, recipe):
 
 def report_ram(result):
     report_core_balance(result["rows"])
-    compact = {k: v for k, v in result.items() if k not in ("ticks", "rows", "piece_census")}
+    compact = {k: v for k, v in result.items() if k not in ("ticks", "rows", "piece_census", "definitions")}
     print("MEASURED ram (shared physics; send outside fixed ticks): " + json.dumps(compact), flush=True)
 
 
@@ -840,10 +891,10 @@ def run_ram(args, out, recipe):
     children, logs = [], []
     serverlog = out / "server.log"
     snapshot = ServerLogs(serverlog, None if local else args.deployment).snapshot
-    def spawn(binary, path, extra):
+    def spawn(binary, path, extra, cwd=ROOT):
         log = path.open("w")
         logs.append(log)
-        child = subprocess.Popen([str(args.bin / binary)], cwd=ROOT, env=dict(env, **extra), stdout=log, stderr=subprocess.STDOUT)
+        child = subprocess.Popen([str(args.bin / binary)], cwd=cwd, env=dict(env, **extra), stdout=log, stderr=subprocess.STDOUT)
         children.append(child)
         return child
     start = time.monotonic()
@@ -853,11 +904,20 @@ def run_ram(args, out, recipe):
                 sock.bind(("127.0.0.1", 5888))
             spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1", **dict(args.server_env)))
         host = admit_server(snapshot, children, start + args.startup_grace, local)
-        spawn("overmatch", out / "client.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script), SPIKE_FRAME_COST=str(out / "client-frames.jsonl")))
+        client = dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script), SPIKE_FRAME_COST=str(out / "client-frames.jsonl"))
+        if args.clip:
+            # A hidden window renders the plan's frames; its paths resolve in the run's folder,
+            # and the owner's graphics settings stay out of the comparison.
+            client.update(OVERMATCH_WINDOW="hidden", OVERMATCH_CAPTURE=str(args.clip.resolve()),
+                          OVERMATCH_CONFIG_DIR=str(out / "config"))
+        spawn("overmatch", out / "client.log", client, cwd=out if args.clip else ROOT)
         deadline = start + wall_limit
+        frames_pending = False
         while True:
             if any(c.poll() is not None for c in children):
                 raise RuntimeError("ram server or client exited before completion")
+            if time.monotonic() >= deadline and frames_pending:
+                raise RuntimeError("ram complete, but by the wall deadline its client never logged 'capture: N of N frames saved'")
             if time.monotonic() >= deadline:
                 raise RuntimeError("ram incomplete by wall deadline (no contact, slow sim, or missing logs)")
             text = snapshot(deadline)
@@ -865,6 +925,10 @@ def run_ram(args, out, recipe):
                 if allocation(text, rehearsal=local) != host:
                     raise RuntimeError("server startup allocation changed during ram")
                 result = ram_summary(text, recipe)
+                if result and args.clip and not re.search(r"capture: (\d+) of \1 frames saved", (out / "client.log").read_text()):
+                    # The clip's frames may outlast the capture; the deadline bounds an approach
+                    # that never opened them.
+                    frames_pending, result = True, None
                 if result:
                     log = (out / "client.log").read_text()
                     if log.count("client: connected (entity") != 1 or "harness: released" not in log:
@@ -999,7 +1063,7 @@ def run(args, out):
     server = None
     try:
         with logpath.open("w") as log:
-            server = subprocess.Popen([str(ROOT / "target/debug/overmatch-server")], cwd=ROOT,
+            server = subprocess.Popen([str(BIN / "overmatch-server")], cwd=ROOT,
                                       env=env, stdout=log, stderr=subprocess.STDOUT)
             with logpath.open() as reader:
                 while True:
@@ -1079,11 +1143,12 @@ def main():
     parser.add_argument("--tanks", type=count, help="total tanks, including bots and real links (owner workload: 30)")
     parser.add_argument("--clients", type=count, help="real window-less clients; remaining tanks are bots (default: all tanks)")
     parser.add_argument("--startup-grace", type=positive, default=90, help="admission and trailing-window watchdog seconds")
-    parser.add_argument("--bin", type=Path, default=ROOT / "target/debug", help="binary directory (default target/debug; other directories must already be built)")
+    parser.add_argument("--bin", type=Path, default=BIN, help="binary directory (default target/debug; other directories must already be built)")
     parser.add_argument("--rehearsal", action="store_true", help="local plumbing only: print unpriced observations without claiming a two-vCPU allocation")
     parser.add_argument("--print-server-env", action="store_true", help="print the recipe/environment for the operator's deployment, then exit without a build or run")
     parser.add_argument("--replication-trace", action="store_true", help="require and save replication envelope size histograms (the server runs REPLICATION_TRACE)")
     parser.add_argument("--server-env", type=server_env, action="append", default=[], metavar="OVERMATCH_KEY=VALUE", help="repeatable: set one OVERMATCH_ lever on the server only (match and ram runs; saved as server-env.json)")
+    parser.add_argument("--clip", type=Path, help="local --ram only: the driving client takes this capture plan's frames on a hidden window, its paths resolved in --out (scripts/debris-lab)")
     parser.add_argument("--holding-lock", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.bin = args.bin.resolve()
@@ -1098,6 +1163,8 @@ def main():
         parser.error("--rehearsal is local only; hosted runs must verify two vCPU")
     if args.target != "local" and (not (args.schedule or args.ram) or not args.deployment):
         parser.error("remote runs require --schedule or --ram, and --deployment")
+    if args.clip and not (args.ram and args.target == "local"):
+        parser.error("--clip requires a local --ram run")
     if args.ram and (args.schedule or args.sample or args.clients is not None):
         parser.error("--ram is one client; incompatible with --schedule, --sample and --clients")
     ram = ram_recipe(args.ram) if args.ram else None
@@ -1162,7 +1229,7 @@ def main():
     if recipe or ram:
         build.extend(["--bin", "overmatch"])
     build.extend(["--features", "dev_ui,bitprobe"])
-    built = subprocess.run(build, cwd=ROOT, env=env) if args.bin == ROOT / "target/debug" else None
+    built = subprocess.run(build, cwd=ROOT, env=env) if args.bin == BIN else None
     elapsed = time.monotonic() - start
     print(f"Build/freshness wall time (including lock wait): {elapsed:.2f} s", file=sys.stderr)
     (out / "build-seconds.txt").write_text(f"{elapsed:.3f}\n")

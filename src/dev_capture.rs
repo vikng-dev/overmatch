@@ -8,7 +8,10 @@
 //! `OVERMATCH_BATTLE`, `OVERMATCH_XRAY`) also select the scene; a capture inherits their values.
 //!
 //! [`CapturePlugin`] takes the plan's `frames` and `keys`. It is mounted after `crate::windowed_runtime`
-//! by every windowed root: the offline route, both sandboxes, and the windowed network client. A
+//! by every windowed root: the offline route, both sandboxes, and the windowed network client,
+//! scripted or not. A scripted client's frames open on its tank's approach to the ram recipe's
+//! construction ([`Anchor::Approach`], whose user is `scripts/debris-lab`); its script owns its
+//! input and its end, so it holds no keys and does not exit when its frames are on disk. A
 //! plan without `frames` runs its cues on a normal window and takes no frame (the scene of a frame
 //! cost measurement). The cue plugins take the plan's other fields where an authority
 //! can raise their events: [`offline_impact_plugin`],
@@ -21,7 +24,7 @@
 //! retina window), so HUD evidence can also request an ordinary scale-1 window. Every capture run seeds the view RNG (cosmetic effect
 //! variation, otherwise seeded from the wall clock) with [`VIEW_SEED`], so two runs of one scenario
 //! on a fixed step draw the same sprites. The process exits once every frame is on disk, with a
-//! failure code if any is missing.
+//! failure code if any is missing; a scripted client logs `capture: N of N frames saved` instead.
 //!
 //! # Invariant: a capture run shows no window
 //!
@@ -63,6 +66,10 @@ use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
 use bevy::ui::IsDefaultUiCamera;
 
+use avian3d::prelude::{LinearVelocity, Position, Rotation};
+
+use crate::construction::{Body, breakage::Breakage};
+use crate::scatter::MapInstance;
 use crate::sight::SightMode;
 
 /// Resolution: seconds allowed for the GPU target, camera info and UI layout to follow retargeting.
@@ -93,6 +100,21 @@ struct Capture {
     /// Frames requested so far: an index into `at`.
     requested: usize,
     saved: usize,
+    /// The process exits once every frame is saved; false where a harness script owns its end.
+    ends_run: bool,
+}
+
+/// The app second a timeline-opening event happened, once it has: the first frame falls
+/// [`WARM_UP`] after it, the rest keep the plan's spacing. Absent, frames count from the anchor.
+#[derive(Resource)]
+struct FrameEpoch(Option<f32>);
+
+/// The approach that opens the frames ([`Anchor::Approach`]) and the plan's `frames.lead_s`.
+#[derive(Resource)]
+struct Approach {
+    instance: String,
+    heading: Quat,
+    lead_s: f32,
 }
 
 /// The capture of the plan's `frames` (module doc) and its `keys`; each is inert where the plan
@@ -102,7 +124,7 @@ pub struct CapturePlugin(pub Anchor);
 impl Plugin for CapturePlugin {
     fn build(&self, app: &mut App) {
         if let Some(plan) = plan() {
-            build_plan(app, self.0, plan).unwrap_or_else(|error| plan::refuse(error));
+            build_plan(app, self.0.clone(), plan).unwrap_or_else(|error| plan::refuse(error));
         }
     }
 }
@@ -113,24 +135,98 @@ pub(crate) fn build_plan(
     anchor: Anchor,
     plan: &plan::CapturePlan,
 ) -> Result<(), plan::PlanError> {
-    if plan
-        .frames
-        .as_ref()
-        .is_some_and(|frames| matches!(frames.camera, plan::Camera::Follow { .. }))
-        && !matches!(anchor, Anchor::Scenario)
+    let frames = plan.frames.as_ref();
+    if frames.is_some_and(|frames| matches!(frames.camera, plan::Camera::Follow { .. }))
+        && !matches!(anchor, Anchor::Scenario | Anchor::Approach { .. })
     {
         return Err(plan::PlanError::FollowWithoutTank(anchor));
     }
+    let refuse = |field, why| {
+        Err(plan::PlanError::Anchor {
+            field,
+            anchor: anchor.clone(),
+            why,
+        })
+    };
+    let approach = match (&anchor, frames.and_then(|frames| frames.lead_s)) {
+        (Anchor::Approach { .. }, _) if !plan.keys.is_empty() => {
+            return refuse(
+                "keys",
+                "a harness script owns this client's input; hold no keys",
+            );
+        }
+        (Anchor::Approach { instance, heading }, Some(lead_s)) => Some(Approach {
+            instance: instance.clone(),
+            heading: *heading,
+            lead_s,
+        }),
+        (Anchor::Approach { .. }, None) => {
+            return refuse(
+                "frames.lead_s",
+                "a scripted client's frames open on its tank's approach; give the lead in seconds",
+            );
+        }
+        (_, Some(_)) => {
+            return refuse(
+                "frames.lead_s",
+                "only a scripted client's approach reads it",
+            );
+        }
+        (_, None) => None,
+    };
     // Frames choose their update strategy before the clock suspends it.
-    mount_plan(app, plan);
-    clock::install(app, anchor);
+    if let Some(frames) = frames {
+        mount(app, frames, approach.as_ref());
+    }
+    if let Some(approach) = approach {
+        app.insert_resource(approach)
+            .insert_resource(FrameEpoch(None))
+            .add_systems(Update, open_on_approach.before(capture).in_set(clock::Cues));
+    }
+    mount_keys(app, plan);
+    clock::install(app, &anchor);
     Ok(())
 }
 
-fn mount_plan(app: &mut App, plan: &plan::CapturePlan) {
-    if let Some(frames) = &plan.frames {
-        mount(app, frames);
+/// Open the frames' timeline the first frame the controlled tank's root, as presented and at its
+/// replicated speed, would reach the instance's bounds within the warm-up and the lead, so the
+/// first frame falls the lead before it does. Before spawn there is no controlled tank, nor its
+/// replicated velocity: a legitimate wait.
+fn open_on_approach(
+    time: Res<Time>,
+    approach: Res<Approach>,
+    mut epoch: ResMut<FrameEpoch>,
+    tanks: Query<(&Transform, &LinearVelocity), With<crate::tank::Controlled>>,
+    constructions: Query<(&MapInstance, &Breakage, &Position, &Rotation), With<Body>>,
+) {
+    if epoch.0.is_some() {
+        return;
     }
+    let Some((tank, velocity)) = crate::tank::controlled_one(tanks.single()) else {
+        return;
+    };
+    let (_, breakage, position, rotation) = (constructions.iter())
+        .find(|(instance, ..)| instance.id == approach.instance)
+        .expect(
+            "this client admitted the approach's instance against its own map, whose world \
+             spawns every instance at startup",
+        );
+    let frame = breakage.physics_frame((position, rotation));
+    let local = frame.rotation.inverse() * (tank.translation - frame.translation);
+    let (min, max) = breakage.kind.bounds();
+    let gap_m = local.clamp(min, max).distance(local);
+    let speed = velocity.0.length();
+    if gap_m <= (WARM_UP + approach.lead_s) * speed {
+        info!(
+            "capture: approach {gap_m} m from {} at {speed} m/s, {} s",
+            approach.instance,
+            time.elapsed_secs()
+        );
+        epoch.0 = Some(time.elapsed_secs());
+    }
+}
+
+fn mount_keys(app: &mut App, plan: &plan::CapturePlan) {
     if !plan.keys.is_empty() {
         let holds = plan.keys.clone();
         info!("capture: keys {holds:?}");
@@ -218,7 +314,9 @@ fn prepare_output(path: &Path) -> Result<(), plan::PlanError> {
     Ok(())
 }
 
-fn mount(app: &mut App, frames: &plan::Frames) {
+/// `approach`, a scripted client's, poses a follow camera's offset and leaves the run's end to
+/// its script.
+fn mount(app: &mut App, frames: &plan::Frames, approach: Option<&Approach>) {
     let size = frames.size();
     info!(
         "capture: {} at {:?} s, sight {}, {}x{}, ui {}, gizmos {}",
@@ -282,7 +380,8 @@ fn mount(app: &mut App, frames: &plan::Frames) {
             );
         }
         plan::Camera::Follow { offset } => {
-            let offset = Vec3::from(offset);
+            let offset =
+                approach.map_or(Quat::IDENTITY, |approach| approach.heading) * Vec3::from(offset);
             app.add_systems(
                 PostUpdate,
                 (move |tanks: Query<&Transform, With<crate::tank::Controlled>>,
@@ -321,6 +420,7 @@ fn mount(app: &mut App, frames: &plan::Frames) {
         switched: false,
         requested: 0,
         saved: 0,
+        ends_run: approach.is_none(),
     });
     app.add_systems(Update, capture.in_set(clock::Cues));
     if !frames.ui {
@@ -540,7 +640,7 @@ fn frame_path(path: &Path, at: f32, frames: usize) -> PathBuf {
     reason = "a dev capture spanning time, its state, images, cameras, gizmo config, sight mode and exit"
 )]
 fn capture(
-    shot_ready: Option<Res<fuze::ShotReady>>,
+    epoch: Option<Res<FrameEpoch>>,
     mut commands: Commands,
     time: Res<Time>,
     mut cap: ResMut<Capture>,
@@ -550,13 +650,11 @@ fn capture(
     mode: Option<ResMut<SightMode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    // The game's damage-model shot frames count from the observed burst, after target warm-up
-    // and burst-view preparation; the plan's relative frame spacing remains intact.
-    let t = if let Some(ready) = shot_ready {
-        let Some(at) = ready.0 else {
+    let t = if let Some(epoch) = epoch {
+        let Some(at) = epoch.0 else {
             return;
         };
-        time.elapsed_secs() - at + cap.at[0] - WARM_UP - BURST_VIEW_WARM_UP
+        time.elapsed_secs() - at + cap.at[0] - WARM_UP
     } else {
         time.elapsed_secs()
     };
@@ -595,7 +693,9 @@ fn capture(
     }
     let last = cap.at[cap.at.len() - 1];
     if cap.saved == cap.at.len() {
-        exit.write(AppExit::Success);
+        if cap.ends_run {
+            exit.write(AppExit::Success);
+        }
     } else if t >= last + GRACE {
         error!("capture: {} of {} frames saved", cap.saved, cap.at.len());
         exit.write(AppExit::error());
@@ -615,7 +715,12 @@ fn save_frame(
             .to_rgb8()
             .save_with_format(&path, image::ImageFormat::Png)
         {
-            Ok(()) => cap.saved += 1,
+            Ok(()) => {
+                cap.saved += 1;
+                if cap.saved == cap.at.len() {
+                    info!("capture: {0} of {0} frames saved", cap.saved);
+                }
+            }
             Err(error) => {
                 error!("capture: frames.out {}: {error}", path.display());
                 exit.write(AppExit::error());
@@ -836,6 +941,103 @@ mod tests {
         }
     }
 
+    /// APPROACH: a scripted client's frames count from its tank's approach to the named
+    /// construction, never from startup: the first falls the plan's lead before the tank, at its
+    /// speed, would reach the construction. `scripts/debris-lab` pairs two runs' clips by that
+    /// event. A mutant timing them from startup frames before the tank is near; one ignoring the
+    /// speed opens them on the slow pass, 10 m out, or not on the fast one; one firing them all at
+    /// once breaks the spacing.
+    #[test]
+    fn approach_frames_count_from_the_tanks_approach() {
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-approach-fixture-{}.png",
+            std::process::id()
+        ));
+        // Fixture: two frames half a second apart, the first half a second before the column.
+        let fixture = plan::CapturePlan::parse(&format!(r#"(frames: (out: {path:?}, at: [2.0, 2.5], lead_s: 0.5, camera: Follow(offset: (0.0, 5.0, 10.0))))"#)).unwrap();
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Assets<Image>>()
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_millis(250),
+            ));
+        let anchor = Anchor::Approach {
+            instance: "column".into(),
+            heading: Quat::IDENTITY,
+        };
+        build_plan(&mut app, anchor, &fixture).unwrap();
+        app.world_mut().spawn((
+            MapInstance {
+                id: "column".into(),
+                ordinal: 0,
+            },
+            Breakage::new(crate::construction::tests::column_construction(), 0),
+            Position::default(),
+            Rotation::default(),
+            Body,
+        ));
+        // Fixture: 10 m from the column's bounds, closing at 1 m/s, then at 10 m/s.
+        let tank = (app.world_mut())
+            .spawn((
+                crate::tank::Controlled,
+                Transform::from_xyz(0.0, 1.0, 10.5),
+                LinearVelocity(Vec3::NEG_Z),
+            ))
+            .id();
+        for _ in 0..12 {
+            app.update();
+            let requested = app.world().resource::<Capture>().requested;
+            assert_eq!(requested, 0, "frames wait for the approach");
+        }
+        app.world_mut().get_mut::<LinearVelocity>(tank).unwrap().0 = Vec3::NEG_Z * 10.0;
+        app.update();
+        let opened =
+            (app.world().resource::<FrameEpoch>().0).expect("at 10 m/s the tank is 1 s away");
+        loop {
+            app.update();
+            let since = app.world().resource::<Time>().elapsed_secs() - opened;
+            let due = [0.0, 0.5].iter().filter(|d| WARM_UP + *d <= since).count();
+            assert_eq!(
+                app.world().resource::<Capture>().requested,
+                due,
+                "{since} s after"
+            );
+            if due == 2 {
+                break;
+            }
+        }
+    }
+
+    /// A scripted client's plan holds no keys (its script owns the input) and names its lead; no
+    /// other root reads a lead. Each is refused before a frame or cue runs.
+    #[test]
+    fn approach_admission_refuses_keys_and_a_misplaced_lead() {
+        let fixture = |lead: &str, keys: &str| {
+            plan::CapturePlan::parse(&format!(
+                r#"(frames: (out: "/tmp/overmatch-approach-admission.png"{lead}){keys})"#
+            ))
+            .unwrap()
+        };
+        let (lead, keys) = (", lead_s: 0.5", ", keys: [(key: KeyW, from: 0.0, to: 1.0)]");
+        let approach = || Anchor::Approach {
+            instance: "column".into(),
+            heading: Quat::IDENTITY,
+        };
+        for (anchor, plan, field) in [
+            (approach(), fixture(lead, keys), "keys"),
+            (approach(), fixture("", ""), "frames.lead_s"),
+            (Anchor::Startup, fixture(lead, ""), "frames.lead_s"),
+        ] {
+            let mut app = App::new();
+            let error = build_plan(&mut app, anchor, &plan).unwrap_err();
+            assert!(
+                matches!(&error, plan::PlanError::Anchor { field: named, .. } if *named == field),
+                "{error}"
+            );
+            assert!(!app.world().contains_resource::<Capture>());
+        }
+    }
+
     /// The game's damage-model terrain cues must refuse coordinates outside either the loaded
     /// grid or the flat world's slab before any cue time is consumed.
     #[test]
@@ -1007,6 +1209,7 @@ mod tests {
             switched: false,
             requested: 1,
             saved: 0,
+            ends_run: true,
         });
         // Writing a PNG to an existing directory fails on every supported OS.
         let path = std::env::temp_dir();
