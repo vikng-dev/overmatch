@@ -381,16 +381,18 @@ mod tests {
         }
     }
 
-    /// Every contact visit reads its owner's speeds after a push. A step along the current face
-    /// must reach the face and speeds a fresh search finds from the same totals. Fixture: class
-    /// drivetrains driven and braked, parked or not, from rest and moving, with seeded pushes of
-    /// up to five brake capacities that cross held, sliding and limited faces.
+    /// Every contact visit reads its owner's speeds after a push, and readback commits them. A
+    /// step along the current face must reach the face and speeds a fresh search finds from the
+    /// same totals, and hold each brake the search holds exactly at its target: the next
+    /// interval offers static capacity only then. Fixture: class drivetrains driven, pivoting
+    /// and braked, parked or not, from rest and moving, with seeded pushes of up to five brake
+    /// capacities that cross held, sliding and limited faces.
     #[test]
     fn face_steps_agree_with_a_fresh_search() {
         use crate::track::drive::{DriveAxes, DriveIntent, DriveTarget};
         use crate::track::drive_fixture::{class_drivetrains, construction};
         use transmission::{DriveState, DriveSupply, DriveTick, TransmissionState};
-        let (mut stepped, mut searched, mut worst) = (0, 0, 0.0_f64);
+        let (mut stepped, mut searched, mut held, mut worst) = (0, 0, 0, 0.0_f64);
         for (fp, tp) in class_drivetrains() {
             let fp = construction(&fp);
             let h = 1.0 / 384.0; // Fixture interval, s.
@@ -398,7 +400,11 @@ mod tests {
                 throttle: 0.5,
                 steer: 0.4,
             });
-            for intent in [axes, DriveIntent::Brake] {
+            let pivot = DriveIntent::Axes(DriveAxes {
+                throttle: 0.0,
+                steer: 0.4,
+            });
+            for intent in [axes, pivot, DriveIntent::Brake] {
                 for park in [false, true] {
                     for speeds in [[0.0; 2], [1.0, -2.0], [4.0; 2]] {
                         let state = DriveState {
@@ -456,6 +462,15 @@ mod tests {
                                         for (a, b) in step.speeds.iter().zip(&fresh.speeds) {
                                             worst = worst.max((a - b).abs() / (1.0 + b.abs()));
                                         }
+                                        for row in mechanical.rows.iter().filter(|r| {
+                                            r.dynamic.is_some() && !r.starts_sliding(&fresh.speeds)
+                                        }) {
+                                            held += 1;
+                                            assert!(
+                                                !row.starts_sliding(&step.speeds),
+                                                "a step holds a brake exactly where the search does"
+                                            );
+                                        }
                                     }
                                     None => searched += 1,
                                 }
@@ -466,10 +481,12 @@ mod tests {
                 }
             }
         }
-        println!("FACE_STEP stepped={stepped} searched={searched} worst_relative={worst:e}");
+        println!(
+            "FACE_STEP stepped={stepped} searched={searched} held={held} worst_relative={worst:e}"
+        );
         assert!(
-            stepped > 0 && searched > 0,
-            "the fixture must both step along faces and cross them"
+            stepped > 0 && searched > 0 && held > 0,
+            "the fixture must step along held faces and cross faces"
         );
         // Resolution: the contact stores impulses in f32; a step must agree below that rounding.
         assert!(
