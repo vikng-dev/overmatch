@@ -150,7 +150,9 @@ impl ContactMetric {
         let mut p = self.previous;
         let mut evaluated = self.evaluate((one, two), p, false);
         let mut applied = [0.0; 2];
-        // Resolution: one current-face step and at most one corrective face step per visit.
+        // Resolution: a visit's work is bounded rather than converged per point: one current-face
+        // step and at most one corrective one. The bare-inertia exit below took at most 0.012 % of
+        // any measured line's visits (MEASURED, `track-contact.md`).
         for _ in 0..2 {
             let (gradient, metric) = evaluated;
             // Resolution: candidates share the rigid solver's f32 impulse storage.

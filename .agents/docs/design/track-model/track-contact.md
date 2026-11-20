@@ -39,9 +39,14 @@ If the face changes again, the row removes this point's entire impulse, includin
 start, measures slip at zero total impulse, and takes a bare-belt-inertia disk step from zero.
 The work reference must be zero impulse: a warm base can already contain numerical energy.
 Within a fixed regime, bare mobility bounds the constrained response from above; relaxation
-carries the undershoot. Static capacity above kinetic leaves a band where neither a held nor
-a sliding answer is self-consistent. The second exit bounds work there rather than demanding
-per-point convergence. `disk_minimum` owns the disk law, `block::solve_limited` owns regimes,
+carries the undershoot. The band where neither a held nor a sliding answer is self-consistent
+belongs to our regime rule, not to the friction law: each search restarts a brake static and
+judges it against the current contact totals as a fixed load, so a sliding total below static
+capacity holds it again. A hull pressing a held belt then slips with friction inside its Coulomb
+disk until its slip passes what the held brake stops by (S − K)·h/I, with S and K the static and
+kinetic ratings, h the substep and I the belt inertia: about 0.018 m/s for the Tiger at six
+substeps (DERIVED). The second exit bounds work there rather than demanding per-point
+convergence. `disk_minimum` owns the disk law, `block::solve_limited` owns regimes,
 `Solution::response` supplies face mobility and sensitivities, and `Solution::step` follows them.
 The seam's trait knows no drivetrain types.
 
@@ -299,6 +304,8 @@ Known differences between the channels, none tuned:
   still took energy in some tick of 7 of 12 such runs, up to 1.1 MJ, the worst tick's work mostly
   the pinch's normal rows; with the band, none of the 12 did (MEASURED 2026-11-15, 57 t fixture
   hull). What remains:
+  - *Breakaway per search.* Decide each static row's breakaway once per interval from the
+    complete totals after the biased pass, kinetic through relaxation; the second exit only caps.
   - *One normal per convex pair* (#378). A slice still meets matter beside the shoe with its pair's
     one normal, and a hull-fixed face, the sprocket's and idler's wraps, records no rise: there a
     slice bears matter under its edge as the stop does, and the exposed-face admission alone keeps

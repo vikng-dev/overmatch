@@ -115,8 +115,9 @@ pub(crate) struct FaceResponse {
     sensitivity: Inline<Inline<f64>>,
     interior: Inline<usize>,
     active: Inline<usize>,
-    /// A row broke static capacity within this interval. A search restarts it static and may
-    /// hold it again, which this sliding face cannot certify.
+    /// A row broke static capacity within this interval. Our regime rule restarts each search
+    /// static against the current totals, so a later search may hold it again; this sliding face
+    /// cannot certify that. `track-contact.md` derives the band this rule leaves.
     broke: bool,
 }
 
