@@ -31,16 +31,19 @@ solution before the next substep; contact transfers supply traction history to t
 ledger. Friction against a wall can lift the hull wherever the belt wraps an end wheel.
 
 The contact has two exits. It takes a Coulomb-disk step using the current mechanical face's
-mobility and re-solves each owner from the substep-start state and current contact totals. An
-unchanged face accepts that affine solution; a changed face gets one corrective step. If the
-face changes again, the row removes this point's entire impulse, including its cached warm
+mobility and pushes the impulse to each owner. On one face the owner's speeds, row impulses and
+limit multipliers are affine in contact impulse, so the owner steps along its face when a search
+trial's tests accept the step; otherwise it re-solves from the substep-start state and current
+contact totals. An unchanged face accepts that solution; a changed face gets one corrective step.
+If the face changes again, the row removes this point's entire impulse, including its cached warm
 start, measures slip at zero total impulse, and takes a bare-belt-inertia disk step from zero.
 The work reference must be zero impulse: a warm base can already contain numerical energy.
 Within a fixed regime, bare mobility bounds the constrained response from above; relaxation
 carries the undershoot. Static capacity above kinetic leaves a band where neither a held nor
 a sliding answer is self-consistent. The second exit bounds work there rather than demanding
 per-point convergence. `disk_minimum` owns the disk law, `block::solve_limited` owns regimes,
-and `Solution::response` supplies face mobility. The seam's trait knows no drivetrain types.
+`Solution::response` supplies face mobility and sensitivities, and `Solution::step` follows them.
+The seam's trait knows no drivetrain types.
 
 Finite-surface friction runs after both normal passes, sharing one accumulated impulse and one
 mechanical budget. The game deliberately retains the biased pass: fresh contacts must hold
@@ -91,22 +94,27 @@ or separated loose pieces. Pass costs include normal and ordinary contact rows, 
 belt-face point visits in that pass. Tick time includes the whole headless app update and its
 fixture bookkeeping. This is local release pricing, not a measurement on the hosted machine.
 
-MEASURED 2026-11-20 on the local Apple M4, Low Power Mode OFF. Both builds use the release
-profile and `dev_ui,bitprobe`; `main` is `7b046e22`. Each cell is **main / capped row**:
+MEASURED 2026-11-20 on the local Apple M4, Low Power Mode off, no compile running. Both builds
+use the release profile and `dev_ui,bitprobe`; `main` is `491eccdb`. The probe ran on both
+builds interleaved, three times each; each cell is the median, **main / capped row**:
 
 | support / tanks | belt visits, summed | biased µs/point | relax µs/point | contact ms/tick | whole update ms/tick |
 |---|---:|---:|---:|---:|---:|
-| slab / 1 | 10716 / 10836 | 0.635 / 1.295 | 1.749 / 2.346 | 0.200 / 0.308 | 1.116 / 1.560 |
-| slab / 8 | 86172 / 87084 | 0.601 / 1.339 | 1.607 / 2.425 | 1.487 / 2.561 | 4.071 / 6.422 |
-| debris / 1 | 32160 / 32832 | 0.068 / 0.806 | 0.192 / 0.855 | 0.065 / 0.426 | 0.926 / 1.746 |
-| debris / 8 | 256872 / 262920 | 0.070 / 0.787 | 0.176 / 0.841 | 0.493 / 3.343 | 2.418 / 7.278 |
+| slab / 1 | 10716 / 10836 | 0.675 / 1.108 | 1.696 / 2.002 | 0.198 / 0.264 | 1.120 / 1.156 |
+| slab / 8 | 86172 / 87084 | 0.611 / 1.045 | 1.680 / 2.036 | 1.542 / 2.095 | 4.087 / 4.260 |
+| debris / 1 | 32160 / 32832 | 0.076 / 0.447 | 0.207 / 0.446 | 0.071 / 0.229 | 0.929 / 1.085 |
+| debris / 8 | 256872 / 262842 | 0.069 / 0.393 | 0.179 / 0.428 | 0.497 / 1.686 | 2.406 / 3.374 |
 
-The debris price is poor: eight tanks add 4.860 ms/update, 3.01 times main (DERIVED from the
-MEASURED table). Contact passes alone rise from 0.493 to 3.343 ms/tick. Exact-zero owner pushes
-reuse an already-certified solution; that elision reduced the same eight-tank debris fixture
-from 8.256 to 7.278 ms/update (MEASURED). Rows sharing a hull require sequential effects;
-independent owners inherit Avian 0.8.0's graph-colour dispatch, including its 64-constraint
-serial floor. The table prices that dispatch rather than assuming two workers parallelize it.
+Eight tanks on debris add 0.968 ms/update, 1.40 times main (DERIVED from the MEASURED table).
+Main's update also runs two `bitprobe`-only conveyor scans the capped row deleted; timers inside
+them read 0.250 ms/tick on debris and 0.407 on slab with eight tanks (MEASURED), so a build
+without `bitprobe` widens each gap by that much. A sampling profile of the debris, eight-tank
+cell splits the friction hook's samples into the disk step (34%), the owner's face step with its
+exact re-snap (43%), searches at face changes (10%) and the rigid metric (9%) (MEASURED).
+Exact-zero owner pushes reuse an already-certified solution. Rows sharing a hull require
+sequential effects; independent owners inherit Avian 0.8.0's graph-colour dispatch, including
+its 64-constraint serial floor. The table prices that dispatch rather than assuming two workers
+parallelize it.
 
 **Capped-row visits (MEASURED 2026-11-20).** Temporary counters at `ContactMetric::minimum`
 entry and its third step counted both normal passes, excluding warm application. On a broad
