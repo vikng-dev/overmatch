@@ -65,10 +65,12 @@
 //! (`contact_transfer`, resting contacts).
 //!
 //! ORDER. Avian finds a switched body's new pairs, and so builds and solves its contacts, in the
-//! order the bodies switched (`collider_tree/update.rs`, `MovedProxies`: insertion order). Freeze
-//! takes islands in Avian's island order and both switch their pieces in entity order, which a
-//! run's history fixes; a hash set's order follows the entities' bits, which can differ between
-//! runs of the same match.
+//! order the bodies switched (`collider_tree/update.rs`, `MovedProxies`: insertion order). The thaw
+//! switches its pieces in the order of the pose bits they froze at ([`Frozen`]), the entity only
+//! breaking a tie: an entity id follows a run's allocation history, which two runs of one scene
+//! need not share. Freeze takes islands in Avian's island order and switches their pieces in entity
+//! order, which is not shown to reach a solve: in `freeze_and_thaw_follow_no_entity_id` it changes
+//! and no pose bit does. A hash set's order follows the entities' bits.
 //!
 //! COST, OPEN. The reach casts at most one spatial query per body it evaluates, and exactly one
 //! when the body has a solid collider with nonempty masks (`Reach::of`); it evaluates each awake
@@ -944,7 +946,11 @@ fn thaw(p: Thaw, mut commands: Commands) {
         }
         pieces.append(&mut freed);
     }
-    pieces.sort_unstable();
+    // Frozen pose order, the entity only breaking a tie (module doc, ORDER).
+    pieces.sort_unstable_by_key(|&piece| {
+        let (frozen, ..) = frozen.get(piece).expect("a thawing piece is frozen");
+        (frozen.pose, piece)
+    });
     for &piece in &pieces {
         commands
             .entity(piece)
@@ -1794,8 +1800,8 @@ mod tests {
     }
 
     /// Three stacks of three side by side, frozen on a slab as one island, then a mover sliding
-    /// into them: every piece's pose bits and whether it is frozen, every update.
-    fn freeze_thaw_trace(app: &mut App) -> Vec<(Vec<[u32; 7]>, Vec<bool>)> {
+    /// into them: the pieces, and every piece's pose bits and whether it is frozen, every update.
+    fn freeze_thaw_trace(app: &mut App) -> (Vec<Entity>, Vec<(Vec<[u32; 7]>, Vec<bool>)>) {
         slab(app, 0.0);
         let pieces: Vec<_> = [-SIDE, 0.0, SIDE]
             .into_iter()
@@ -1804,7 +1810,7 @@ mod tests {
         until_frozen(app, &pieces);
         mover(app, Vec3::new(-3.0, SIDE * 0.75, 0.0), 3.0)
             .insert(CollisionLayers::new([Layer::Vehicle], LayerMask::ALL));
-        (0..320)
+        let trace = (0..320)
             .map(|_| {
                 app.update();
                 let world = app.world();
@@ -1819,33 +1825,56 @@ mod tests {
                 let frozen = pieces.iter().map(|&piece| is_frozen(app, piece)).collect();
                 (poses, frozen)
             })
-            .collect()
+            .collect();
+        (pieces, trace)
     }
 
-    /// FREEZE AND THAW ARE DETERMINISTIC IN ORDER: the same scene, built once as is and again
-    /// after other entities shift every entity's bits while keeping their order, repeats every
-    /// pose bit and every freeze and thaw. Avian's work after a switch follows the order the
-    /// bodies switched (module doc); a thaw that switched pieces in a hash set's order would
-    /// follow the bits.
+    /// FREEZE AND THAW FOLLOW NO ENTITY ID: the same scene, built on fresh entities, after other
+    /// entities shift every id's bits while keeping their order, and on freed ids reused
+    /// last-freed first, which reorders them, repeats every pose bit and every freeze and thaw.
+    /// A switch in a hash set's order parts at the shift, one in entity order at the reuse
+    /// (module doc, ORDER); a same-recipe replay of the ram instrument relies on neither.
     #[test]
-    fn freeze_and_thaw_are_deterministic_in_order() {
-        let trace = |shift: usize| {
+    fn freeze_and_thaw_follow_no_entity_id() {
+        let trace = |prepare: fn(&mut App)| {
             let mut app = settling(GRAVITY);
-            app.world_mut()
-                .spawn_batch((0..shift).map(|_| Name::new("shift")));
+            prepare(&mut app);
             freeze_thaw_trace(&mut app)
         };
-        let plain = trace(0);
+        let (fresh, plain) = trace(|_| {});
         assert!(
             plain.iter().any(|(_, frozen)| frozen.contains(&false)),
             "the mover thawed the fixture"
         );
-        // Fixture shifts.
-        for shift in [333, 1000] {
-            for (update, (a, b)) in plain.iter().zip(&trace(shift)).enumerate() {
+        // Fixture: more shifting or freed entities than the scene spawns.
+        let (_, shifted) = trace(|app| {
+            app.world_mut()
+                .spawn_batch((0..333).map(|_| Name::new("shift")));
+        });
+        let (reused, reordered) = trace(|app| {
+            let freed: Vec<Entity> = app
+                .world_mut()
+                .spawn_batch((0..256).map(|_| Name::new("freed")))
+                .collect();
+            for entity in freed {
+                assert!(app.world_mut().despawn(entity), "a fresh entity despawns");
+            }
+        });
+        let order = |pieces: &[Entity]| {
+            let mut ranks: Vec<usize> = (0..pieces.len()).collect();
+            ranks.sort_by_key(|&i| pieces[i]);
+            ranks
+        };
+        assert_ne!(
+            order(&fresh),
+            order(&reused),
+            "the freed entities reorder the pieces"
+        );
+        for (layout, trace) in [("shifted", shifted), ("reused", reordered)] {
+            for (update, (a, b)) in plain.iter().zip(&trace).enumerate() {
                 assert_eq!(
                     a, b,
-                    "shift {shift}, update {update} after the mover's spawn"
+                    "{layout} ids, update {update} after the mover's spawn"
                 );
             }
         }
