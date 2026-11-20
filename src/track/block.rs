@@ -60,6 +60,22 @@ impl Row {
                     .map(|(a, v)| a.abs() * (1.0 + v.abs()))
                     .sum::<f64>())
     }
+
+    fn regime_bounds(&self, sliding: bool) -> Bounds {
+        if sliding {
+            self.dynamic
+                .expect("only a static element has a sliding regime")
+        } else {
+            self.bounds
+        }
+    }
+
+    /// A static element still held whose speeds leave its target breaks to its sliding bounds.
+    fn breaks_away(&self, sliding: bool, velocity: &[f64]) -> bool {
+        !sliding
+            && self.dynamic.is_some()
+            && (dot(&self.jacobian, velocity) - self.target).abs() > self.slip_tolerance(velocity)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,10 +268,7 @@ impl Solution {
         let bounds: Inline<_> = rows
             .iter()
             .zip(&self.rows)
-            .map(|(row, result)| match row.dynamic {
-                Some(sliding) if result.dynamic => sliding,
-                _ => row.bounds,
-            })
+            .map(|(row, result)| row.regime_bounds(result.dynamic))
             .collect();
         if !check_face(
             rows,
@@ -271,12 +284,12 @@ impl Solution {
             return None;
         }
         snap(&mut speeds, rows, &self.held);
-        if rows.iter().zip(&self.rows).any(|(row, result)| {
-            !result.dynamic
-                && row.dynamic.is_some()
-                && (dot(&row.jacobian, &speeds) - row.target).abs() > row.slip_tolerance(&speeds)
-        }) {
-            return None; // A static row breaks away; the search applies its sliding bounds.
+        if rows
+            .iter()
+            .zip(&self.rows)
+            .any(|(row, result)| row.breaks_away(result.dynamic, &speeds))
+        {
+            return None; // The search applies its sliding bounds.
         }
         Some(Self {
             speeds,
@@ -534,12 +547,7 @@ pub(crate) fn solve_limited(
             );
             dynamic[i] = row.starts_sliding(&start);
         }
-        bounds.push(if dynamic[i] {
-            row.dynamic
-                .expect("only a static element has a sliding regime")
-        } else {
-            row.bounds
-        });
+        bounds.push(row.regime_bounds(dynamic[i]));
     }
     let mut seed = warm.seed(rows, limits);
     for (i, bound) in bounds.iter().enumerate() {
@@ -571,13 +579,9 @@ pub(crate) fn solve_limited(
         }
         let mut broke = false;
         for (i, row) in rows.iter().enumerate() {
-            if !dynamic[i]
-                && let Some(sliding) = row.dynamic
-                && (dot(&row.jacobian, &result.speeds) - row.target).abs()
-                    > row.slip_tolerance(&result.speeds)
-            {
-                bounds[i] = sliding;
+            if row.breaks_away(dynamic[i], &result.speeds) {
                 dynamic[i] = true;
+                bounds[i] = row.regime_bounds(true);
                 broke = true;
             }
             result.rows[i].dynamic = dynamic[i];
