@@ -50,8 +50,9 @@ struct Current {
 impl Drivetrain {
     /// Warm application preserves summation order but needs no intermediate solution. The first
     /// read settles all accumulated warm impulses; graph colouring gives the owner exclusive use.
-    /// That read runs inside the contact colour loop, serial at small populations; against an
-    /// owner-parallel settle pass after warm start, its cost is unmeasured.
+    /// That read runs inside the contact colour loop, serial for a colour of fewer than 64
+    /// constraints (`avian3d::utils::par_for_each`); whether a separate owner-parallel settle
+    /// after warm start would cost less is unmeasured.
     fn current(&self) -> &Current {
         self.current.get_or_init(|| {
             let mut warm = self.seed.clone();
