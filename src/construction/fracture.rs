@@ -3297,10 +3297,10 @@ mod tests {
     /// destruction model): the fractured zone about a face's crushed volume comes from its part's
     /// matter nearest it ([`take_zone`]). One fixture brick slab and the same slab cut into 32 × 32
     /// cells, under the same rays (a near burst's, cast on the whole slab and each keyed to the
-    /// cell it stops on), lose the same volume to its faces' loads to f32 rounding, the slab wearing where the cells
-    /// nearest the burst turn to dust. A zone held to the cell a face lies on fails here; a breach
-    /// whose size follows the burst and not the bake's cell size rests on it. Fixture geometry and
-    /// burst.
+    /// cell it stops on), lose the same volume to its faces' loads to f32 rounding, the slab
+    /// wearing where the cells nearest the burst turn to dust. A zone held to the cell a face lies
+    /// on fails here; a breach whose size follows the burst and not the bake's cell size rests on
+    /// it. Fixture geometry and burst.
     #[test]
     fn a_blast_takes_the_same_volume_however_finely_its_part_is_cut() {
         let material = brick();
