@@ -7,6 +7,7 @@ use super::{
 };
 use crate::avian_ext::surface_motion::{self, SurfaceModel};
 use avian3d::dynamics::solver::solver_body::SolverBody;
+use std::sync::OnceLock;
 
 /// Replicas consume streamed speeds; the authority owns their momentum exchange (ADR-0037).
 #[derive(Clone, Debug)]
@@ -34,6 +35,7 @@ impl SurfaceModel for Prescribed {
     fn free_mobility(&self, _index: usize) -> f64 {
         0.0
     }
+    fn warm_push(&mut self, _index: usize, _impulse: f64) {}
     fn push(&mut self, _index: usize, _impulse: f64) -> bool {
         false
     }
@@ -41,46 +43,95 @@ impl SurfaceModel for Prescribed {
 
 #[derive(Clone, Debug)]
 pub(crate) enum Coordinates {
-    Drivetrain {
-        prepared: Box<PreparedDrive>,
-        impulses: [f64; 2],
-        solved: Solution,
-        response: FaceResponse,
-        warm: WarmStart,
-    },
+    Drivetrain(Box<Drivetrain>),
     Prescribed(Prescribed),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Drivetrain {
+    prepared: PreparedDrive,
+    impulses: [f64; 2],
+    seed: WarmStart,
+    current: OnceLock<Current>,
+}
+
+#[derive(Clone, Debug)]
+struct Current {
+    solved: Solution,
+    response: FaceResponse,
+    warm: WarmStart,
+}
+
+impl Drivetrain {
+    /// Warm application preserves summation order but needs no intermediate solution. The first
+    /// read settles all accumulated warm impulses; graph colouring gives the owner exclusive use.
+    fn current(&self) -> &Current {
+        self.current.get_or_init(|| {
+            let mut warm = self.seed.clone();
+            let mechanical = &self.prepared.mechanical;
+            let solved = mechanical.solve(self.impulses, &mut warm);
+            let response =
+                solved.response(&mechanical.speeds, &mechanical.rows, &mechanical.limits);
+            Current {
+                solved,
+                response,
+                warm,
+            }
+        })
+    }
+
+    fn push(&mut self, index: usize, impulse: f64) -> bool {
+        self.current();
+        let total = self
+            .impulses
+            .get_mut(index)
+            .expect("a contact binds its owner's prepared coordinate");
+        if impulse == 0.0 {
+            return false; // The current solution already certifies unchanged totals.
+        }
+        *total += impulse;
+        let Current {
+            solved,
+            response,
+            warm,
+        } = self
+            .current
+            .get_mut()
+            .expect("the current totals were just settled");
+        let mechanical = &self.prepared.mechanical;
+        let next = mechanical.solve(self.impulses, warm);
+        let changed = !solved.same_face(&next);
+        if changed {
+            *response = next.response(&mechanical.speeds, &mechanical.rows, &mechanical.limits);
+        }
+        *solved = next;
+        changed
+    }
 }
 
 impl Coordinates {
     #[cfg(test)]
     pub(crate) fn kinetic_energy(&self) -> f64 {
-        let Self::Drivetrain {
-            prepared, solved, ..
-        } = self
-        else {
+        let Self::Drivetrain(drive) = self else {
             panic!("the energy witness prepares dynamic mechanical coordinates");
         };
-        prepared
+        drive
+            .prepared
             .mechanical
             .speeds
             .iter()
-            .zip(&solved.speeds)
+            .zip(&drive.current().solved.speeds)
             .map(|(s, v)| 0.5 * s.inertia * v * v)
             .sum()
     }
 
-    pub(crate) fn drivetrain(prepared: PreparedDrive) -> Self {
-        let mut warm = WarmStart::default();
-        let mechanical = &prepared.mechanical;
-        let solved = mechanical.solve([0.0; 2], &mut warm);
-        let response = solved.response(&mechanical.speeds, &mechanical.rows, &mechanical.limits);
-        Self::Drivetrain {
-            prepared: Box::new(prepared),
+    pub(crate) fn drivetrain(prepared: PreparedDrive, seed: WarmStart) -> Self {
+        Self::Drivetrain(Box::new(Drivetrain {
+            prepared,
             impulses: [0.0; 2],
-            solved,
-            response,
-            warm,
-        }
+            seed,
+            current: OnceLock::new(),
+        }))
     }
 
     pub(crate) fn install(self, body: &mut SolverBody) {
@@ -94,70 +145,56 @@ impl Coordinates {
         warm: &mut WarmStart,
         h: f32,
     ) -> transmission::TransmissionReport {
-        let Self::Drivetrain {
-            prepared, solved, ..
-        } = self
-        else {
+        let Self::Drivetrain(drive) = self else {
             panic!(
                 "a dynamic drivetrain finishes its own mechanical coordinates, never a replica's"
             );
         };
-        warm.remember(
-            &prepared.mechanical.rows,
-            &prepared.mechanical.limits,
-            solved,
-        );
-        transmission::finish_advance(tp, state, prepared, solved, h)
+        *warm = drive
+            .current
+            .get()
+            .map_or_else(|| drive.seed.clone(), |c| c.warm.clone());
+        let solved = drive.prepared.mechanical.solve(drive.impulses, warm);
+        transmission::finish_advance(tp, state, &drive.prepared, &solved, h)
     }
 
     #[cfg(test)]
     pub(crate) fn prepared(&self) -> &PreparedDrive {
-        let Self::Drivetrain { prepared, .. } = self else {
+        let Self::Drivetrain(drive) = self else {
             panic!("the witness prepares a dynamic drivetrain")
         };
-        prepared
+        &drive.prepared
     }
-
     #[cfg(test)]
     pub(crate) fn initial_speeds(&self) -> [f32; 2] {
         [0, 1].map(|i| self.prepared().mechanical.speeds[i + 1].value as f32)
     }
-
     #[cfg(test)]
     pub(crate) fn speeds(&self) -> [f32; 2] {
         [0, 1].map(|i| self.speed(i) as f32)
     }
-
     #[cfg(test)]
     pub(crate) fn contact_impulses(&self) -> [f64; 2] {
-        let Self::Drivetrain { impulses, .. } = self else {
+        let Self::Drivetrain(drive) = self else {
             panic!("the witness exchanges dynamic momentum")
         };
-        *impulses
+        drive.impulses
     }
-
     #[cfg(test)]
     pub(crate) fn add_impulses(&mut self, impulses: [f64; 2]) {
         for (i, p) in impulses.into_iter().enumerate() {
             self.push(i, p);
         }
     }
-
     #[cfg(feature = "bitprobe")]
     pub(crate) fn work(&self) -> f64 {
-        let Self::Drivetrain {
-            prepared,
-            impulses,
-            solved,
-            ..
-        } = self
-        else {
+        let Self::Drivetrain(drive) = self else {
             return 0.0;
         }; // Replicas integrate no local work.
-        prepared.mechanical.speeds[1..]
+        drive.prepared.mechanical.speeds[1..]
             .iter()
-            .zip(&solved.speeds[1..])
-            .zip(impulses)
+            .zip(&drive.current().solved.speeds[1..])
+            .zip(drive.impulses)
             .map(|((from, to), p)| p * (from.value + to) * 0.5)
             .sum()
     }
@@ -169,22 +206,36 @@ impl SurfaceModel for Coordinates {
     }
     fn speed(&self, index: usize) -> f64 {
         match self {
-            Self::Drivetrain { solved, .. } => solved.speeds[index + 1],
+            Self::Drivetrain(drive) => drive.current().solved.speeds[index + 1],
             Self::Prescribed(p) => p.speed(index),
         }
     }
     fn mobility(&self, index: usize) -> f64 {
         match self {
-            Self::Drivetrain { response, .. } => response.mobility[index + 1][index + 1],
+            Self::Drivetrain(drive) => drive.current().response.mobility[index + 1][index + 1],
             Self::Prescribed(p) => p.mobility(index),
         }
     }
     fn free_mobility(&self, index: usize) -> f64 {
         match self {
-            Self::Drivetrain { prepared, .. } => {
-                1.0 / prepared.mechanical.speeds[index + 1].inertia
-            }
+            Self::Drivetrain(drive) => 1.0 / drive.prepared.mechanical.speeds[index + 1].inertia,
             Self::Prescribed(p) => p.free_mobility(index),
+        }
+    }
+    fn warm_push(&mut self, index: usize, impulse: f64) {
+        assert!(
+            impulse.is_finite(),
+            "a warm exchange supplies a finite generalized impulse"
+        );
+        match self {
+            Self::Drivetrain(drive) => {
+                *drive
+                    .impulses
+                    .get_mut(index)
+                    .expect("a contact binds its owner's prepared coordinate") += impulse;
+                drive.current.take();
+            }
+            Self::Prescribed(p) => p.warm_push(index, impulse),
         }
     }
     fn push(&mut self, index: usize, impulse: f64) -> bool {
@@ -193,30 +244,7 @@ impl SurfaceModel for Coordinates {
             "a surface exchange supplies a finite generalized impulse"
         );
         match self {
-            Self::Drivetrain {
-                prepared,
-                impulses,
-                solved,
-                response,
-                warm,
-            } => {
-                let total = impulses
-                    .get_mut(index)
-                    .expect("a contact binds its owner's prepared coordinate");
-                if impulse == 0.0 {
-                    return false; // The current solution already certifies unchanged totals.
-                }
-                *total += impulse;
-                let mechanical = &prepared.mechanical;
-                let next = mechanical.solve(*impulses, warm);
-                let changed = !solved.same_face(&next);
-                if changed {
-                    *response =
-                        next.response(&mechanical.speeds, &mechanical.rows, &mechanical.limits);
-                }
-                *solved = next;
-                changed
-            }
+            Self::Drivetrain(drive) => drive.push(index, impulse),
             Self::Prescribed(p) => p.push(index, impulse),
         }
     }
@@ -227,14 +255,12 @@ pub(crate) fn surface(body: &SolverBody) -> &Coordinates {
     data.downcast_ref()
         .expect("a belt owner installs its drivetrain or prescribed replica coordinates")
 }
-
 #[cfg(test)]
 pub(crate) fn surface_mut(body: &mut SolverBody) -> &mut Coordinates {
     let data: &mut dyn core::any::Any = surface_motion::surface_mut(body);
     data.downcast_mut()
         .expect("the witness installs drivetrain coordinates")
 }
-
 pub(crate) fn read_back(
     body: &SolverBody,
     tick: &mut transmission::DriveTick,

@@ -157,13 +157,10 @@ impl DriveTick {
             }
             self.contacts_started = true;
         }
-        super::super::surface_motion::Coordinates::drivetrain(super::prepare_advance(
-            fp,
-            tp,
-            &self.state,
-            &self.orders,
-            h,
-        ))
+        super::super::surface_motion::Coordinates::drivetrain(
+            super::prepare_advance(fp, tp, &self.state, &self.orders, h),
+            self.warm.clone(),
+        )
     }
 
     pub(crate) fn finish_contact(

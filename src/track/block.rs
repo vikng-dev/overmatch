@@ -303,10 +303,6 @@ pub(crate) struct WarmStart {
 }
 
 impl WarmStart {
-    pub(crate) fn remember(&mut self, rows: &[Row], limits: &[ImpulseLimit], solved: &Solution) {
-        self.seed(rows, limits);
-        self.assignment.clone_from(&solved.assignment);
-    }
     fn seed(&mut self, rows: &[Row], limits: &[ImpulseLimit]) -> Vec<State> {
         let matches = self.layout.len() == rows.len()
             && self.limits.len() == limits.len()

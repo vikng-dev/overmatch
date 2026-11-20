@@ -16,6 +16,8 @@ pub(crate) trait SurfaceModel: core::any::Any + Send + Sync + core::fmt::Debug {
     fn speed(&self, index: usize) -> f64;
     fn mobility(&self, index: usize) -> f64;
     fn free_mobility(&self, index: usize) -> f64;
+    /// Warm application precedes all solve-stage reads, so its intermediate totals need no solve.
+    fn warm_push(&mut self, index: usize, impulse: f64);
     fn push(&mut self, index: usize, impulse: f64) -> bool;
 }
 
@@ -283,7 +285,13 @@ pub fn solve(
         }; // Frictionless contact.
         if let SurfaceFrictionStage::WarmStart(coefficient) = stage {
             let p = tangents[0] * part.impulse.x + tangents[1] * part.impulse.y;
-            exchange_pair((body1, body2), coordinates, p * coefficient, &mut [0.0; 2]);
+            let p = p * coefficient;
+            for (body, coordinate) in [(&mut *body1, coordinates[0]), (&mut *body2, coordinates[1])]
+            {
+                if let Some(c) = coordinate {
+                    surface_mut(body).warm_push(c.index, f64::from(c.direction.dot(p)));
+                }
+            }
             part.impulse *= coefficient;
             continue;
         }
