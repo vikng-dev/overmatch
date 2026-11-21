@@ -1263,17 +1263,20 @@ fn continued<'a>(
 ///   `V_c` (m³) the sum of their Law 1 volumes, at their volume-weighted point. Law 1 is linear in
 ///   the impulse, so `V_c` is its face's however the face is cut.
 /// - **Radius.** ASSUMED a half-ball on the struck face, `r_c = (3 V_c / 2π)^⅓` m, whatever dish
-///   the pulse crushed, held at `σ_c,d` in an unbounded solid (no free face enters the field). Its
-///   hoop tension `σ_c,d (r_c / r)³ / 2` falls to `σ_t,d` at `r_f = r_c k^⅓`, `k` the row's
-///   [`Compaction::zone`], so the half-ball of `r_f` holds `k V_c`.
+///   the pulse crushed, held at `σ_c,d` in an unbounded solid (no free face enters the field).
+///   The zone reaches `r_f = r_c k^⅓`, `k` the row's [`Compaction::zone`], so the half-ball of
+///   `r_f` holds `k V_c`.
 /// - **Region.** The chunks [`continued`] reaches from the crushed ones, each while its
 ///   equal-volume sphere comes within `r_f` of the point: across elements of one bonded wall,
-///   through buried matter, never past another material or a crack.
+///   through buried matter, never past another material or a crack. Resolution: a chunk is in
+///   while any of its sphere is, so the region errs outward, by a shell at most one chunk's
+///   sphere thick; a centroid rule would cut a zone smaller than its chunks to the struck chunk
+///   alone, and its volume would follow the cut.
 /// - **Spent.** Each crushed chunk gives its own Law 1 volume, then the region gives the rest of
 ///   `k V_c` nearest first, the last chunk worn and not emptied: the zone removes a volume, never
 ///   a count of chunks. Where matter fills the half-ball the volume binds and the cut does not
-///   show; in a thin wall, at an edge or beside another material the radius binds, to one chunk's
-///   sphere, and the zone removes what stands inside it.
+///   show; in a thin wall, at an edge or beside another material the radius binds, and the zone
+///   removes the region whole.
 fn fractured(structure: &Structure, state: &mut State, loads: &[Load], struck: &mut Struck) {
     let mut crushed = BTreeMap::<usize, (f32, Vec3)>::new();
     for load in loads.iter().filter(|load| load.peak.is_some()) {
@@ -1317,6 +1320,8 @@ fn fractured(structure: &Structure, state: &mut State, loads: &[Load], struck: &
                 }
             }
         }
+        // A crushed chunk beyond the radius carries the flood and gives its own volume alone.
+        region.retain(|&c| reach(c) <= radius);
         region.sort_by(|&a, &b| reach(a).total_cmp(&reach(b)).then(a.cmp(&b)));
         let mut left = zone;
         let rest = region.iter().map(|&c| (c, f32::INFINITY));
@@ -3509,10 +3514,12 @@ mod tests {
     /// removes the cells whose equal-volume spheres come within `r_f = (3 k V_c / 2π)^⅓` of its
     /// point and touches no other, though the plate holds less inside than `k V_c`; and a column
     /// of another material, of fixed seams or of cracked seams beside the point bounds it, the
-    /// cells past the column untouched ([`fractured`]). A breach no wider than its burst's reach
-    /// in a thin wall, and one that stops at a timber frame, rest on it: a zone spending its
-    /// volume with no radius, or flooding past another material, a fixing or a crack, fails
-    /// here. Fixture geometry and crushed volume.
+    /// cells past the column untouched ([`fractured`]). A crushed cell past the radius gives its
+    /// own crushed volume alone, and where the volume binds the nearest cells give it. A breach
+    /// no wider than its burst's reach in a thin wall, and one that stops at a timber frame,
+    /// rest on it: a zone spending its volume with no radius, emptying a far crushed cell, taking
+    /// cells in any order but nearest first, or flooding past another material, a fixing or a
+    /// crack, fails here. Fixture geometry and crushed volumes.
     #[test]
     fn a_zone_stops_at_its_radius_and_where_its_solid_ends() {
         let (w, cell) = (13_usize, 0.25_f32);
@@ -3553,6 +3560,54 @@ mod tests {
             inside.iter().all(|&c| state.fate[c] == Fate::Dust),
             "each gives its whole pool"
         );
+
+        // A dish wider than its zone: a trail of cells right of the struck one, each crushed a
+        // little (fixture volume, too small to move the point past a cell's reach), runs two
+        // cells past the radius.
+        let trail = 1.0e-5_f32;
+        let dish: Vec<Load> = (0..=6)
+            .map(|k| Load {
+                chunk: struck + k,
+                at: plate.chunks[struck + k].centroid,
+                crushed: if k == 0 { crushed } else { trail },
+                ..pulse
+            })
+            .collect();
+        let mut state = State::new(&plate);
+        strike(&plate, &mut state, &dish);
+        for far in [struck + 5, struck + 6] {
+            assert!(!inside.contains(&far));
+            assert_eq!(
+                state.pool[far],
+                full_pool(&plate.chunks[far]) - trail,
+                "a crushed cell past the radius gives what was crushed of it"
+            );
+        }
+
+        // A zone of two and a half cells about a point up and right of the struck cell's middle:
+        // the volume binds, and the cells below and left, inside the radius, stay full.
+        let small = 2.5 * plate.chunks[struck].volume;
+        let near = Load {
+            at: at + Vec3::new(0.1, 0.1, 0.0),
+            crushed: small / zone,
+            ..pulse
+        };
+        let reach = (1.5 * small / PI).cbrt();
+        let mut state = State::new(&plate);
+        strike(&plate, &mut state, &[near]);
+        let spent: f32 = (0..w * w)
+            .map(|c| full_pool(&plate.chunks[c]) - state.pool[c])
+            .sum();
+        assert!((spent / small - 1.0).abs() < 1e-5, "the zone gives k V_c");
+        for far in [struck - 1, struck - w] {
+            let chunk = &plate.chunks[far];
+            assert!(chunk.centroid.distance(near.at) - (0.75 * chunk.volume / PI).cbrt() <= reach);
+            assert_eq!(
+                state.pool[far],
+                full_pool(chunk),
+                "the nearest matter goes first"
+            );
+        }
 
         // The column of seams two cells right of the struck cell, inside the radius.
         let edge = w / 2 + 2;
