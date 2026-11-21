@@ -14,6 +14,9 @@
 // the asset tools; one static body with a collider per element, never a terrain-field block.
 {
     "house_proxy": Construction(asset: "house_1"),
+    // Placed by hand: the export record in `level.json` has no entry for it, and the game reads
+    // that block for its keys only.
+    "village_hall": Construction(asset: "hall_1"),
     "church_proxy": Block(min: (-15.0, -18.5, -7.5), max: (15.0, 18.5, 7.5), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z)),
     "fir_tree_01_a_LOD2": Construction(asset: "fir_1"),
     "fir_tree_01_b_LOD2": Construction(asset: "fir_1"),

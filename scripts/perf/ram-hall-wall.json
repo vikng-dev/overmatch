@@ -1,0 +1,10 @@
+{
+  "instance": "village_hall_0001",
+  "heading_deg": -20.0,
+  "runup_margin": 3.0,
+  "minimum_speed_fraction": 0.95,
+  "approach_s": 45,
+  "deadline_s": 10,
+  "settle_s": 2,
+  "in_place_m": [0.1, {"Unit": "the structure reading's scale of still where it was built: every corner of a chunk within about a brick's width of where it was built; a larger offset reads as masonry that moved"}]
+}

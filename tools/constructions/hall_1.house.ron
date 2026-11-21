@@ -1,0 +1,128 @@
+// The generator's input for `hall_1`, the village hall: one storey of solid brick in three rooms
+// under a framed timber roof. `bake-constructions` turns it into
+// `assets/constructions/hall_1/hall_1.construction.ron`. Frame, units and each field's meaning as
+// `house_1.house.ron`; a number that file sources is named here by that file alone.
+House(
+    id: "hall_1",
+    // Taste, the village's large building: 12 m across the gable span, 16 m along the ridge.
+    width_m: 12.0,
+    length_m: 16.0,
+    // ASSUMED construction: a one-brick wall, the village house's, outside and between the rooms.
+    wall_thickness_m: 0.25,
+    // The village house's brick course.
+    course_m: 0.075,
+    // ASSUMED construction: the village house's 0.45 m foundation depth and its bedding.
+    foundation_courses: 6,
+    foundation_attachment: "mortared",
+    // Taste, a hall's storey: the eaves 3.15 m above the ground point.
+    eaves_course: 48,
+    // Taste, a low roof over the wide span: 1 : 4 (its hypotenuse √17, taken by square root).
+    pitch: (1, 4),
+    // The village house's plate, board thickness and gable overhang.
+    plate_height_m: 0.10,
+    board_thickness_m: 0.05,
+    gable_overhang_m: 0.30,
+    // Resolution: the sheathing laid as 0.40 m courses, each standing for the two or three
+    // narrower boards a roof is sheathed in, so the roof is 32 pieces and components, not about
+    // 86. Sixteen a slope cover 6.4 m, past the rafters' 6.29 m from ridge to tail (DERIVED:
+    // 6.1 m of run over the slope's cosine 4/√17).
+    board_width_m: 0.40,
+    boards_per_slope: 16,
+    parts: (
+        walls: (
+            material: "Brick",
+            surface_frame: Upright,
+            cut: Planar((
+                pitch_m: (0.55, Resolution("the cell a breach is drawn and a wall falls in, and
+                    the count the laws and the view pay for, held by the bake's byte budget
+                    (`BAKED_BYTES_MAX`, `tools/src/construction.rs`): the hall bakes 1,007 chunks
+                    and 3,436 joints in 939,167 bytes (MEASURED); at the village house's 0.21 m a
+                    draft baked 5.5 MB (MEASURED), with the timber at 0.15 m. A brick chunk is about 92 L (DERIVED:
+                    pitch_m² / keep_share through the 0.25 m wall), so a breach is drawn in cells
+                    2.6 times the house's across")),
+                keep_share: (0.82, Taste("masonry break look, the village house's")),
+            )),
+        ),
+        plates: (
+            material: "Wood",
+            // ASSUMED authoring choice: plates run along the authored Z ridge.
+            surface_frame: Grain((0.0, 0.0, 1.0)),
+            cut: Cells((
+                size_m: (0.25, Resolution("the cell a timber break is drawn in across the
+                    grain, and the timber's share of the count the walls' pitch_m states: the
+                    plates, frame and boards bake 233 chunks (MEASURED); at the village house's
+                    0.15 m, about 1,080 (DERIVED: a member thinner than the cell keeps a site by
+                    its section over size_m², so its count goes as size_m⁻³), so the hall's
+                    timber breaks in pieces 1.7 times the house's across")),
+                stretch: (5.0, Taste("timber break look, the village house's")),
+            )),
+        ),
+        roof: (
+            material: "Wood",
+            // ASSUMED authoring choice: boards run along the authored Z ridge.
+            surface_frame: Grain((0.0, 0.0, 1.0)),
+            cut: Cells((
+                size_m: (0.25, Resolution("as the plates'")),
+                stretch: (5.0, Taste("timber break look, the village house's")),
+            )),
+        ),
+    ),
+    // Taste, the plan: a window 1.0 m wide from 0.9 m to 2.25 m over the ground point at each end
+    // of the long walls, lighting the end rooms, and a doorway 2.0 m wide and 2.25 m high through
+    // the middle of each gable wall and each cross wall.
+    walls: (
+        east: [(u: (-6.5, -5.5), courses: (18, 36)), (u: (5.5, 6.5), courses: (18, 36))],
+        west: [(u: (-6.5, -5.5), courses: (18, 36)), (u: (5.5, 6.5), courses: (18, 36))],
+        north: [(u: (-1.0, 1.0), courses: (6, 36))],
+        south: [(u: (-1.0, 1.0), courses: (6, 36))],
+    ),
+    // Taste, the plan: a 6 m middle room between two 4.75 m end rooms.
+    cross_walls: [
+        (name: "inner_north", at_z_m: 3.0, thickness_m: 0.25, openings: [(u: (-1.0, 1.0), courses: (6, 36))]),
+        (name: "inner_south", at_z_m: -3.0, thickness_m: 0.25, openings: [(u: (-1.0, 1.0), courses: (6, 36))]),
+    ],
+    // ASSUMED construction, every section and spacing Unknown (settled by a span table for the
+    // period's softwood rafters and beams over these spans): 100 × 200 mm rafters at up to 1.0 m
+    // centres, their tails 0.1 m past the long walls, on a 150 × 250 mm ridge beam that spans from
+    // wall to wall, 6 m at most. The beam carries the rafters' heads, so the frame states no ties:
+    // a tie lapped to a rafter's foot needs a fixing far denser than the one nailed kind
+    // (`assets/materials/attachments.ron`), and that kind's lateral strength is itself Unknown.
+    roof_frame: Some((
+        material: "Wood",
+        cut: Cells((
+            size_m: (0.25, Resolution("as the plates'")),
+            stretch: (5.0, Taste("timber break look, the village house's")),
+        )),
+        rafter_width_m: 0.10,
+        rafter_depth_m: 0.20,
+        rafter_spacing_m: 1.0,
+        eaves_overhang_m: 0.10,
+        ridge_width_m: 0.15,
+        ridge_depth_m: 0.25,
+    )),
+    joins: [
+        // The masonry and the plates, as the village house's.
+        (parts: ("pier", "pier"), by: "mortared"),
+        (parts: ("pier", "wall_plate"), by: "mortared"),
+        (parts: ("lintel", "wall_plate"), by: "mortared"),
+        (parts: ("gable", "wall_plate"), by: "mortared"),
+        // ASSUMED construction: the ridge beam bedded in its seat in each gable, as a plate on
+        // its wall. Laid `resting`, the seat's two upright faces (0.03 m² each, the beam's sides
+        // against the gable's wedges) read a pull at rest in one draft and opened, so the hall
+        // left its baked state at load; whether that pull is the roof's or the solve's is not
+        // settled (backlog destruction-02).
+        (parts: ("gable", "ridge"), by: "mortared"),
+        // Each rafter nailed to its plate, to the ridge beam and to its pair, each board to the
+        // rafters under it and the boards beside it, each ridge segment to the next. The nailed
+        // kind spreads one nailing density over a joint's area, so it under-counts a rafter's
+        // few nails on its small bearing; its shear is Unknown (both stated on the kind).
+        (parts: ("rafter", "wall_plate"), by: "nailed"),
+        (parts: ("rafter", "ridge"), by: "nailed"),
+        (parts: ("rafter", "rafter"), by: "nailed"),
+        (parts: ("ridge", "ridge"), by: "nailed"),
+        (parts: ("roof", "rafter"), by: "nailed"),
+        (parts: ("roof", "roof"), by: "nailed"),
+        // The rafter over a wall laid on its gable's rake, nothing fixing it there.
+        (parts: ("gable", "rafter"), by: "resting"),
+    ],
+)

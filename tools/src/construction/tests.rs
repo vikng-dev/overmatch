@@ -207,7 +207,7 @@ fn every_interface_is_one_contact() {
     }
 }
 
-/// Every shipped house generator's spec, then the fixture house.
+/// Every shipped house generator's spec, then the fixture house, bare and framed.
 fn houses() -> Vec<House> {
     let dir = crate::repo_root().join(SPECS_DIR);
     let mut houses: Vec<House> = std::fs::read_dir(&dir)
@@ -216,7 +216,7 @@ fn houses() -> Vec<House> {
         .filter(|path| path.to_string_lossy().ends_with(HOUSE_SUFFIX))
         .map(|path| House::from_ron(&std::fs::read_to_string(&path).unwrap()).unwrap())
         .collect();
-    houses.push(fixture_house());
+    houses.extend([fixture_house(), framed_fixture_house()]);
     houses
 }
 
@@ -296,6 +296,8 @@ const FIXTURE_HOUSE: &str = r#"House(
         ))),
     ),
     walls: (east: [], west: [], north: [], south: []),
+    cross_walls: [],
+    roof_frame: None,
     joins: [
         (parts: ("pier", "pier"), by: "mortared"),
         (parts: ("pier", "wall_plate"), by: "mortared"),
@@ -308,6 +310,46 @@ const FIXTURE_HOUSE: &str = r#"House(
 
 fn fixture_house() -> House {
     House::from_ron(FIXTURE_HOUSE).expect("the constructed fixture states a house")
+}
+
+/// FIXTURE DATA: the fixture house with one cross wall and a roof frame, its boards on rafters and
+/// its joins the framed roof's.
+fn framed_fixture_house() -> House {
+    let text = FIXTURE_HOUSE
+        .replace(
+            "cross_walls: []",
+            r#"cross_walls: [(name: "inner", at_z_m: 0.5, thickness_m: 0.25, openings: [])]"#,
+        )
+        .replace(
+            "roof_frame: None",
+            r#"roof_frame: Some((material: "Wood", cut: Whole, rafter_width_m: 0.1,
+                rafter_depth_m: 0.2, rafter_spacing_m: 1.0, eaves_overhang_m: 0.1,
+                ridge_width_m: 0.15, ridge_depth_m: 0.25))"#,
+        )
+        .replace(
+            r#"(parts: ("wall_plate", "roof"), by: "nailed"),"#,
+            r#"(parts: ("rafter", "wall_plate"), by: "nailed"),
+            (parts: ("rafter", "ridge"), by: "nailed"),
+            (parts: ("rafter", "rafter"), by: "nailed"),
+            (parts: ("ridge", "ridge"), by: "nailed"),
+            (parts: ("roof", "rafter"), by: "nailed"),
+            (parts: ("gable", "ridge"), by: "mortared"),"#,
+        )
+        .replace(r#"("gable", "roof")"#, r#"("gable", "rafter")"#);
+    House::from_ron(&text).expect("the constructed fixture states a framed house")
+}
+
+/// A FRAMED ROOF BEARS WHERE ITS JOINS SAY. The bake refuses a touching pair no join names and a
+/// join no pair makes, so the framed fixture bakes under exactly its joins only while every
+/// rafter lies on its plate, on the ridge beam and against its pair, a rafter lies on each
+/// gable's rake, the ridge segments meet end to end in the gables' seats, and the boards lie on
+/// the rafters alone, clear of the plates and gables. The roof's response reads those joints.
+/// Mutants: a rafter short of its plate or ridge, a beam out of its seat, boards left on the
+/// plates.
+#[test]
+fn a_framed_roof_bears_where_its_joins_say() {
+    let framed = house::construction(&framed_fixture_house()).expect("the frame is laid out");
+    bake(&framed, schema::substance_density).expect("each join holds, and nothing else touches");
 }
 
 /// FIXTURE DATA: a planar cut through `depth`, sites `pitch_m` apart, every one kept.
@@ -1107,10 +1149,32 @@ fn a_house_the_generator_cannot_lay_out_is_refused() {
         unreachable!("the fixture's plates are cut in cells")
     };
     cells.size_m.0 = f64::INFINITY;
+    let framed = framed_fixture_house();
+    framed.check().expect("the constructed frame stands");
+    let mut outside = framed.clone();
+    outside.cross_walls[0].at_z_m = 0.5 * outside.length_m;
+    let mut twice = framed.clone();
+    twice.cross_walls.push(twice.cross_walls[0].clone());
+    let (mut wide, mut deep) = (framed.clone(), framed);
+    let framing = "the fixture is framed";
+    wide.roof_frame.as_mut().expect(framing).rafter_width_m = wide.wall_thickness_m;
+    deep.roof_frame.as_mut().expect(framing).ridge_depth_m = deep.width_m;
     for (case, broken, field) in [
         ("past the wall", past, "pier"),
         ("over the next", over, "pier"),
         ("an endless piece", endless, "parts.plates.cut"),
+        ("a cross wall in a gable wall", outside, "cross_walls[0]"),
+        ("a cross wall's name taken", twice, "cross_walls[1].name"),
+        (
+            "a rafter wider than its wall",
+            wide,
+            "roof_frame.rafter_width_m",
+        ),
+        (
+            "a ridge beam deeper than the gable",
+            deep,
+            "roof_frame.ridge_width_m/ridge_depth_m",
+        ),
     ] {
         let err = broken.check().unwrap_err();
         assert!(err.contains(field), "{case}: {err}");
@@ -1256,4 +1320,15 @@ fn cells_follow_stretch_and_grain_rotation() {
             assert!((after.volume() - 3.0 * before.volume()).abs() < 1e-9 * after.volume());
         }
     }
+}
+
+/// A BAKE OVER THE BYTE BUDGET IS REFUSED, NAMING ITS SPEC: the repository holds no construction
+/// text over [`BAKED_BYTES_MAX`], and a spec's cut sizes answer to that bound, so a bake at the
+/// bound passes and one byte more is an authored-data refusal.
+#[test]
+fn a_bake_over_the_byte_budget_is_refused_naming_its_spec() {
+    let full = "x".repeat(BAKED_BYTES_MAX);
+    within_budget("a.house.ron", &full).expect("a text at the budget is inside it");
+    let refusal = within_budget("a.house.ron", &format!("{full}x")).unwrap_err();
+    assert!(refusal.starts_with("a.house.ron:"), "{refusal}");
 }
