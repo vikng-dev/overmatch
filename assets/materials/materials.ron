@@ -516,6 +516,7 @@
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green Norway spruce measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green Norway spruce measurement of this quantity"))),
                 along_grain_compressive_strength: Some((18.8e6, Unknown("ASSUMED related-species value: red spruce's (Picea rubens) green compression parallel to grain, 18,800 kPa (USDA FPL Wood Handbook FPL-GTR-282, 2021, Chapter 5 Table 5-3a, read primary); no Norway spruce value read. Settled by a green Norway spruce measurement of this quantity"))),
+                across_grain_tensile_strength: Some((2.4e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce tension perpendicular to grain at 12 % moisture, about 2.4 MPa, Wood Handbook FPL-GTR-190 Table 5-3a, recalled, not read). Settled by a green Norway spruce measurement of this quantity"))),
             )),
         ),
         "GreenScotsPine": Hard(
@@ -556,6 +557,7 @@
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green Scots pine measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green Scots pine measurement of this quantity"))),
                 along_grain_compressive_strength: Some((18.8e6, Unknown("ASSUMED related-species value: red pine's (Pinus resinosa) green compression parallel to grain, 18,800 kPa (USDA FPL Wood Handbook FPL-GTR-282, 2021, Chapter 5 Table 5-3a, read primary); no Scots pine value read. Settled by a green Scots pine measurement of this quantity"))),
+                across_grain_tensile_strength: Some((2.4e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce tension perpendicular to grain at 12 % moisture, about 2.4 MPa, Wood Handbook FPL-GTR-190 Table 5-3a, recalled, not read). Settled by a green Scots pine measurement of this quantity"))),
             )),
         ),
         "GreenSilverBirch": Hard(
@@ -599,6 +601,7 @@
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green silver birch measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green silver birch measurement of this quantity"))),
                 along_grain_compressive_strength: Some((16.3e6, Unknown("ASSUMED related-species value: paper birch's (Betula papyrifera) green compression parallel to grain, 16,300 kPa (USDA FPL Wood Handbook FPL-GTR-282, 2021, Chapter 5 Table 5-3a, read primary); no silver birch value read. Settled by a green silver birch measurement of this quantity"))),
+                across_grain_tensile_strength: Some((2.4e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce tension perpendicular to grain at 12 % moisture, about 2.4 MPa, Wood Handbook FPL-GTR-190 Table 5-3a, recalled, not read). Settled by a green silver birch measurement of this quantity"))),
             )),
         ),
         // Fired clay brick: every construction's masonry (`assets/constructions/<id>/<id>.construction.ron`
@@ -614,7 +617,7 @@
                 flow strength ~1 GPa, × 1000"))),
             visual: "brick",
             feedback: (
-                exposed_linear_rgb: ((0.45, 0.19, 0.11), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                exposed_linear_rgb: ((0.515, 0.107, 0.042), Taste("material contact and fracture effects: fired clay inside a brick, sRGB (190, 92, 58), as bright as brick_wall_006's photographed bricks' mean (171, 106, 73) and more saturated, unweathered; a hit's mark and a break face show it")),
                 powder_linear_rgb: ((0.4, 0.25, 0.18), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
                 metallic: (0.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
                 roughness_gain: (2.4, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),

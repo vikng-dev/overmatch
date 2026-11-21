@@ -41,13 +41,15 @@
 //!   topology changed or whose pulse ended, and changed spin, continue next tick without requiring
 //!   another deposit.
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
-//!   about its chord, open across each face it crosses ([`open_ends`]), and a blast a dish in each
-//!   chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
-//!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
-//!   or mass reads a hole: they see the whole chunk, and [`Shape`] holds none. A hole holds no more
-//!   than the volume its load crushed, the volume it took from the chunk's pool, so one the size
-//!   of its chunk is a spent pool, recorded as dust. Only the pool decides dust: a chunk holding
-//!   [`HOLES_PER_CHUNK`] holes keeps standing and draws no later one.
+//!   about its chord, open across each face it crosses ([`open_ends`]), and a blast's scab a dish
+//!   in the chunk it leaves ([`holes_of`]); a blast's face cuts none: its fractured zone empties
+//!   the pools of the cells nearest it in turn and may only wear the last ([`fracture::strike`]);
+//!   a chunk still standing after the deposit keeps its hole in a per-chunk list
+//!   ([`Live::holes`]), for the view to draw. No law, collider or mass reads a hole: they see the
+//!   whole chunk, and [`Shape`] holds none. A hole holds no more than the volume its load crushed,
+//!   the volume it took from the chunk's pool, so one the size of its chunk is a spent pool,
+//!   recorded as dust. Only the pool decides dust: a chunk holding [`HOLES_PER_CHUNK`] holes keeps
+//!   standing and draws no later one.
 //! * **The record** ([`Record`]): wear, dust, holes, cohesion cracks and contact separations, in authority order,
 //!   with its tick. The authority appends; the network carries it ([`crate::net`]'s ledger); a
 //!   replica rebuilds the same state from it ([`derive_from_record`]); the view presents it at the
@@ -1662,8 +1664,8 @@ fn evaluate_owner(
     let kind = breakage.kind.clone();
     let construction = breakage.construction;
     let live = breakage.live.as_mut();
-    let blast = blast_loads(&kind, &taken.blast, live);
-    let holes = holes_of(&kind, &taken.lines, &blast);
+    let (blast, scabs) = blast_loads(&kind, &taken.blast, live);
+    let holes = holes_of(&kind, &taken.lines, &scabs);
     let loads: Vec<Load> = taken
         .line_loads
         .iter()
@@ -2045,23 +2047,22 @@ fn apply_deposits(mut p: DepositParam) {
     }
 }
 
-/// A blast's ray hits on one construction as its loads ([`Load::blast`]), each face's Law 2 read on
-/// its chunk's hull at authored size.
+/// A blast's ray hits on one construction as its loads and scabs ([`Load::blast`]), each face's
+/// Law 2 read on its chunk's hull at authored size.
 fn blast_loads(
     kind: &ConstructionKind,
     hits: &[(usize, fracture::RayHit)],
     live: &Live,
-) -> Vec<Load> {
+) -> (Vec<Load>, Vec<fracture::Scab>) {
     if hits.is_empty() {
-        return Vec::new(); // This deposit has no blast surface stops.
+        return (Vec::new(), Vec::new()); // This deposit has no blast surface stops.
     }
     let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
-    let (loads, _) = Load::blast(hits, |c| fracture::Backing {
+    Load::blast(hits, |c| fracture::Backing {
         block: &kind.layout.blocks[c],
         material: kind.layout.materials[c],
         contacts: &contacts,
-    });
-    loads
+    })
 }
 
 type FieldStop = (usize, Vec3, f32, Vec3);
@@ -2301,53 +2302,52 @@ enum Stop {
 }
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
-/// ([`Hole`]); `lines` and the blast's loads `blast` ([`Load::blast`]) in the construction frame at
-/// authored size. Each is sized by the volume it crushes, the volume its load takes from
-/// the chunk's pool: a line's, its energy over the crush energy ([`Material::crush`]); a blast's,
-/// its load's Law 1 volume ([`Load::crushed`]). A line's channel runs along its chord, its radius
-/// the narrower of the cylinder about the chord and the ball that hold that volume (so a chord
-/// grazing a corner never cuts a disc wider than the ball); the blast's dish in a chunk is a ball
-/// about the chunk's load (its face's impulse-weighted centroid) whose half holds it. ASSUMED: a
-/// channel's section is a circle and its width the energy's alone, not the round's diameter; a
-/// dish's centre lies on the chunk's face, so half its ball is in the chunk.
+/// ([`Hole`]); `lines` and the blast's `scabs` ([`Load::blast`]) in the construction frame at
+/// authored size. Each holds the volume its load takes from the chunk's pool: a line's, its
+/// energy over the crush energy ([`Material::crush`]); a scab's, its mass over the density. A
+/// line's channel runs along its chord, its radius the narrower of the cylinder about the chord
+/// and the ball that hold that volume (so a chord grazing a corner never cuts a disc wider than
+/// the ball); a scab's dish is a ball about the back point it leaves whose half holds it. A
+/// blast's face cuts none: its zone empties the pools of the cells nearest it in turn and may only
+/// wear the last, which is drawn whole ([`fracture::strike`]). ASSUMED: a channel's section is a
+/// circle and its width the energy's alone, not the round's diameter; a dish's centre lies on the
+/// chunk's face, so half its ball is in the chunk.
 fn holes_of(
     kind: &ConstructionKind,
     lines: &[(usize, Vec3, Vec3, f32)],
-    blast: &[Load],
+    scabs: &[fracture::Scab],
 ) -> Vec<(usize, Hole)> {
     let layout = &kind.layout;
     cut_holes(
         &layout.blocks,
         |c| Vec3::from_array(kind.asset.chunks[layout.chunks[c] as usize].centroid),
-        |c| layout.materials[c].crush,
+        |c| layout.materials[c],
         lines,
-        blast,
+        scabs,
     )
 }
 
 /// [`holes_of`] on any chunk table: each law chunk's hull `blocks`, its baked `centroid` (the
-/// hole's frame) and its material's crush energy `crush`, all at authored size. The sandbox's wall cuts
-/// its holes here too, so its deposits reach [`HOLES_PER_CHUNK`] as the game's do.
+/// hole's frame) and its `material`, all at authored size. The sandbox's wall cuts its holes here
+/// too, so its deposits reach [`HOLES_PER_CHUNK`] as the game's do.
 pub(crate) fn cut_holes(
     blocks: &[Block],
     centroid: impl Fn(usize) -> Vec3,
-    crush: impl Fn(usize) -> f32,
+    material: impl Fn(usize) -> fracture::Material,
     lines: &[(usize, Vec3, Vec3, f32)],
-    blast: &[Load],
+    scabs: &[fracture::Scab],
 ) -> Vec<(usize, Hole)> {
     use std::f32::consts::PI;
-    let crushed = |c: usize, energy: f32| energy / crush(c);
     let channels = lines.iter().filter_map(|&(c, from, to, energy)| {
-        let volume = crushed(c, energy);
+        let volume = energy / material(c).crush;
         let ball = (0.75 * volume / PI).cbrt();
         let radius = (volume / (PI * from.distance(to))).sqrt().min(ball);
         let (from, to) = open_ends(&blocks[c], from, to);
         Hole::cut(centroid(c), from, to, radius).map(|hole| (c, hole))
     });
-    let dishes = blast.iter().filter_map(|load| {
-        let radius = (1.5 * load.crushed / PI).cbrt();
-        let at = load.at;
-        Hole::cut(centroid(load.chunk), at, at, radius).map(|hole| (load.chunk, hole))
+    let dishes = scabs.iter().filter_map(|scab| {
+        let radius = (1.5 * scab.mass / material(scab.chunk).density / PI).cbrt();
+        Hole::cut(centroid(scab.chunk), scab.at, scab.at, radius).map(|hole| (scab.chunk, hole))
     });
     channels.chain(dishes).collect()
 }

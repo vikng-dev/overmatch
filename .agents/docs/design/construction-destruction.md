@@ -235,7 +235,7 @@ Such cases remain unsupported until a transport model supplies their pressure hi
 - `i_r(Z)` and `i_s(Z)` are Swisdak 1994's metric fits of the Kingery–Bulmash surface-burst impulses (**SOURCED**: DTIC ADA526744, Table 1, PDF pp. 9–10, read off the page images; the fits restate Kingery–Bulmash with a mean error under 1 %, worst 1.5 %, Table 5); a burst in air reads them at `W / 1.8` (**CLAIMED** UFC surface-burst reflection factor).
 - Oblique: `i(θ) = i_r cos²θ + i_s (1 + cos²θ − 2 cos θ)` (**CLAIMED** ConWep blend, stated for pressure, read on impulse: **ASSUMED**).
 - A ray stopping on a chunk face pushes it along the face's inward normal with `i(Z, θ)` over the patch it stands for, `4π share d² / cos θ`, `cos θ` floored at 0.1.
-- A ray stands for a cone of section `4π share d²`; the cones that stop on one chunk or body cover at most its own silhouette across them (a chunk's from its faces, a body collider's from its bounding box), so each keeps `min(1, silhouette / Σ section)` of its energy and push (`fracture::intercepted`). A far ray then pushes the face it lands on with `i × A_face`, not with its patch: without this, one ray landing on a house 535 m from a 5 kg charge pushed one chunk with 1797 N·s (**MEASURED**, the shipped house at unit scale).
+- A ray stands for a cone of section `4π share d²`; the cones that stop on one chunk or body cover at most its own silhouette across them (a chunk's from its faces, a body collider's from its bounding box), so each keeps `min(1, silhouette / Σ section)` of its energy and push (`fracture::intercepted`). A far ray then pushes the face it lands on with `i × A_face`, not with its patch: without this, one ray landing on a house 535 m from a 5 kg charge pushed one chunk with 1797 N·s (**MEASURED**, the shipped house's running-bond bake at unit scale).
 - Every ray stops at `Z = 40 m/kg^⅓`, the reflected fit's edge (`Blast::reach`), so no law reads the fits past their range. Within it a ray stops on the nearest of every construction's standing chunks and unbreakable elements, every dynamic body's collision proxy (Avian colliders on the `Vehicle` and `Debris` layers: a loose piece, a hull, a launched turret; never its armour or witness volumes) and every other surface on the `Terrain` layer (the ground). A ray that stops on a moving body pushes it the same way, at the point it stops, through Avian's impulse, which wakes a sleeping body; it deposits nothing. A ray on any other surface does nothing. A collider holding the burst point shades nothing and takes nothing. A burst inside a tank's box casts no blast (`armor-penetration-and-damage.md` §5, "Containment").
 - The peak overpressure rides beside the impulse (`Blast::peak_pressure`, `Blast::peak`): the same ray, patch, interception and ConWep blend give each blast load a peak force `F_peak` (N), its rays' summed (**ASSUMED**: one chunk's rays arrive together). The section and rest laws read it (Law 3 below).
   - `p_s(Z)`: Swisdak 1994's incident rows, Z 0.2–198.5 (**SOURCED**: ADA526744, Table 1, PDF p. 8); its branches meet within 0.7 % (**DERIVED**).
@@ -250,8 +250,8 @@ The law is stated on the field, whatever finds the surfaces it reaches ([#204](h
 - **The field.** On each face point it reaches, a peak pressure `P` and a specific impulse `i`, from the fits above at `Z = R / W^⅓`, blended by incidence.
 - **Law 1, crush.** Material crushes where `P` beats its dynamic compressive strength `σ_c,d`; the impulse decides how much, by momentum through a compaction front: `Δm = J f(σ_c,d / P) / u_c`, `u_c = √(σ_c,d ε_v / ρ)`, `ε_v` the volumetric strain to lock-up. `f` (`fracture::crush_factor`) is the snowplow front's factor against a triangular pulse: `√(1 − 4r/3)` below ½, `√((16/3) r (1 − r)³)` to 1, zero past it. It replaces the borrowed cavity-strength crush pool.
   - **Built** (lane 4): each blast ray crushes the chunk it stops on by Law 1 at its patch's peak overpressure and the push's impulse, scaled by the share of its cone the chunk intercepts (`fracture::Blast::crushed`, `Material::crushed_by`); a chunk's load sums its rays' volumes. `σ_c,d` is the row's quasi-static compressive strength times its stated DIF, read as the row's reference-rate datum (**ASSUMED**: no strain-rate law; brick's datum is at 100 /s, wood's at 2400 /s). `ε_v = 1 − ρ / ρ_s` (**DERIVED**: the locking idealization compacts the pores shut): brick 0.18, wood 0.70; `u_c` brick 91.6 m/s, wood 229 m/s (**DERIVED** from the shipped rows; wood's `σ_c,d` is 33.4 MPa against the study's recalled 3.8 MPa, so timber crushes far less than the study's table shows). The reference rate records the source measurement; it does not supply a per-pulse rate law or separate intrinsic rate effects from the compaction front's inertia. That applicability remains a validation gap.
-  - **The pool is a volume (m³).** A chunk's pool is its volume; every load wears it by the volume it crushes (`fracture::Load::crushed`). A round's line and a fragment crush their energy over the cavity resistance (`Material::crush`), as before; a blast crushes by Law 1 alone, its energy never entering the pool. A blast's crater dish holds its load's crushed volume. Blast loads carry zero kinetic cavity energy and never source the Lamé crack field. Intercepted chemical-energy shares remain diagnostics in the wall sandbox alone; they drive no removal, hole size, load point or joint stress. Its loads are at each face's impulse-weighted centroid, preserving angular impulse; opposing faces remain separate.
-  - **Representation.** Law 1 is linear in the impulse at a fixed pressure, so a face's crushed volume is its patches' sum however it is cut (`fracture::tests::crushed_mass_is_representation_independent`). **MEASURED** on fixture bursts near a 2 m brick face (the 88 mm HE burst at 0.1 m, a bare 5 kg at 0.3 m): 1024 to 65536 rays, one block or 8 × 8 chunks, agree within 3.17e-4 (maximum relative spread 3.160834e-4, printed at full reporting precision). This certifies those fixture casts only. It does not certify larger charges, other material rows or a far face sparsely covered by rays (#204).
+  - **The pool is a volume (m³).** A chunk's pool is its volume; every load wears it by the volume it crushes (`fracture::Load::crushed`). A round's line and a fragment crush their energy over the cavity resistance (`Material::crush`), as before; a blast crushes by Law 1 alone, its energy never entering the pool, and its face load removes the fractured zone about what it crushes (**Cells and drawn breaks**). Blast loads carry zero kinetic cavity energy and never source the Lamé crack field. Intercepted chemical-energy shares remain diagnostics in the wall sandbox alone; they drive no removal, hole size, load point or joint stress. Its loads are at each face's impulse-weighted centroid, preserving angular impulse; opposing faces remain separate.
+  - **Representation.** Law 1 is linear in the impulse at a fixed pressure, so a face's crushed volume is its patches' sum however it is cut (`fracture::tests::crushed_mass_is_representation_independent`). **MEASURED** on fixture bursts near a 2 m brick face (the 88 mm HE burst at 0.1 m, a bare 5 kg at 0.3 m): 1024 to 65536 rays, one block or 8 × 8 chunks, agree within 3.17e-4 (maximum relative spread 3.160834e-4, printed at full reporting precision). This certifies those fixture casts only. It does not certify larger charges, other material rows or a far face sparsely covered by rays (#204). The volume a blast removes inherits it: its fractured zone comes from its part's matter, never from the cell a face lies on, so one block and the same block cut 32 × 32 lose the same volume under the same rays (`fracture::tests::a_blast_takes_the_same_volume_however_finely_its_part_is_cut`).
   - **The source and its radius.** The environment airblast starts at the filler centre (`Burst::filler_center`), the tip minus the flight axis times the burst block's required, sourced `filler_setback`. The shipped setbacks are **DERIVED, with ASSUMED axial geometry**: a cylinder-equivalent nose plus half the cavity, rounded in the round data; no verified axial drawing is claimed. The charge radius is the equal-volume sphere from filler mass and density, independently of the casing/blast energy split. `Blast::distance` floors every field distance and cone section at that positive radius, including a geometric stop at the source, while the actual face point stays unchanged. The fuze still times and records the tip. A contact burst therefore has a nonzero patch and crushes wherever its pressure beats the material threshold.
 - **Law 2, back scab.** The front face's compression reaches the free back face, reflects as tension, and lifts a scab where `σ_b min(1, 2 ligament / λ) ≥ σ_t,d`, `λ = c τ` the pulse's length, `τ = 2i / P`; it leaves at `(2σ_b − σ_t,d) / ρc`, its momentum taken off the push.
   - **Built** (lane 5, `fracture::scab`, run by `Load::blast` on every loaded (chunk, face)): the back point lies the full hull depth `H` behind the face's impulse-weighted centroid along its inward normal, at the convex hull's actual exit. The ligament `L = H - crater_depth` is the intact material left behind Law 1's local front; through-crush leaves no ligament and emits no rear scab. **ASSUMED:** the ray patch nearest the face centroid supplies the crater depth at that one back point. The patch's depth holds Law 1's volume in the cone expanding behind its entry (`fracture::Crushing`); at normal incidence `d = (R³ + 3 R² V/A)^(1/3) - R`, **DERIVED**, with oblique depth projected onto the face normal using the field's incidence floor. This depth is intensive, unchanged by patch share or silhouette interception. `σ_b` is the solid-angle mean of the face's transmitted stress, the sum over its ray patches of `H / (2π R³) · min(P, σ_c,d) A` (a uniform load over a plane gives back the load). The elastic Boussinesq weighting `3 L³ / (2π R⁵)` was the rejected alternative: it reads three times this on a concentrated load's axis and threw scabs two to three times the study's speeds. `τ = 2J / F` from the face's blow and peak force; `c = √(E / ρ)` (**DERIVED** from the row). The scab is `δ = λ σ_t,d / (2σ_b)` thick (where the net tension first reaches the strength, at most `L`) over the area its transmitted force covers at `σ_b`, `F_t / σ_b`, bounded by the chunk's exposed rear area projected along the normal; contacts between standing matter subtract their projected area on the rear plane: every seam, cracked or not (a crack opens its tension, never its contact), and every rest not yet opened, ground anchors included. No free-surface reflection is created inside a contact. **Gap:** the pulse is not propagated through that contact to a farther free surface. **DERIVED**: it then carries at most `J F_t / F` of the face's momentum. `σ_t,d` is the row's `bulk.tensile` times its sourced `blast.tensile_dif` (brick 0.69 MPa × 3.1 = 2.14 MPa, the DIF **CLAIMED**; wood's ratio 1, **ASSUMED**, the missing truth), refused at load when absent.
@@ -665,6 +665,72 @@ The shared ledger carries wear, holes, dust and cracks; swaps and departures der
 causes. Pieces use source construction/chunk addresses, and the shared cursor controls their
 membership as described in “One assessment path for fixed and moving chunk groups” below.
 
+## Cells and drawn breaks
+
+**A masonry cut ignores the units.** The bake cuts a wall into cells through its depth
+(`tools/src/construction/fracture.rs`, `Planar`): one jittered site per `pitch_m` square on the
+piece's mid-depth plane, a `keep_share` of them kept, a site whose cell holds a sliver dropped
+(`SLIVER_M`), and the Voronoi bisectors between the rest. Every crack runs through the wall's
+thickness at an angle owing nothing to courses or head joints: a StandIn for the rate-dependent
+masonry fracture law (an impulsive load cracks through units, not only along joints), which the
+game does not have. The pitch is `Resolution`: the cell a breach is drawn in and the count the
+laws and the view pay for (its reason is the spec's). The cut that followed bed and head joints is
+gone. The fixture house bakes 1,077 chunks of 15.71 m³, 3,240 joints, 920 KB (MEASURED; the
+running-bond bake: 1,122 chunks, 3,177 joints, 763 KB). In the experiment that chose the cells, a
+rammed wall gave way sooner than the bond had: an observation, not a target.
+
+**A break is drawn rough; its collider stays the cell** (view only, `construction::view::relief`,
+`assets/materials/fracture.ron`). A face a departed neighbour opened, and the matter within a
+wavelength of its edges, moves, by one field of position (value noise, `amplitude_m` and
+`wavelength_m`, both `Taste`) scaled down to nothing a wavelength from the break and faded against
+its element's hull planes: faces sharing an edge draw one curve, a piece fits the hole it left, and
+the element's silhouette never moves. Every other face draws exactly as it did. The load gate
+(`view::refuse_folds`) proves every face of a relieved chunk, hull or cut, unfolded at every reach
+its breaks could give it, so no drawn outline folds. A bound on the field alone was rejected: a
+contraction keeps the continuous image of a face simple but not the chords the draw joins its
+points by, and a face a few millimetres wide folds under it. Displaced geometry was chosen over a shader that erodes the silhouette: it gives a real
+outline, self-shadowing and shadows. Relief on every face of every swapped chunk was rejected: an
+intact house drew 16,804 triangles in 14.2 ms (MEASURED on the first experiment). A break face shows
+its substance's exposed colour, with mortar where the wall's bed, head and leaf joint planes cross
+it when its visual states units, read at its asset-frame position so they travel with a piece:
+course and head spacing MEASURED from `brick_wall_006`'s spectra, leaves counted from the
+element's own face, the bond's stagger data. Bed and head planes alone left parallel stripes on
+every face, since every cut contains the wall's depth as they do. A crack strip follows its edge
+as drawn. A redraw rebuilds only the elements whose standing chunks changed; chunk adjacency is
+read once per kind from the joints.
+
+MEASURED view cost (`edit` profile, best of five; main is the running-bond bake drawn bare):
+
+| | main | cells, drawn breaks |
+|---|---|---|
+| intact house | 668 tris, 0.51 ms | 668 tris, 0.53 ms |
+| one section broken (largest element, one chunk gone) | 1,580 tris, 0.85 ms | 2,988 tris, 1.09 ms fresh; 0.63 ms cached |
+| every element swapped, all standing | 13,796 tris, 5.4 ms | 18,540 tris, 2.5 ms |
+| every chunk its own piece | 13,796 tris, 6.6 ms | 160,736 tris, 82 ms |
+| every joint cracked | 19,166 tris, 1.5 ms | 20,496 tris, 2.5 ms |
+| chunk adjacency, once per kind | none | 0.52 ms |
+| fold sweep, once per kind at load (`view::refuse_folds`) | none | 74 ms (one run) |
+
+The most relief is every chunk drawn as its own piece: each open face cut every `edge_pitch_m`
+along its edges. A piece of several chunks draws fewer, its inner faces flat. No cap: the
+triangles are far inside a frame's budget, and the build cost falls on the frames pieces are
+born in: 76 µs a single-chunk piece (MEASURED), a few milliseconds when one element crumbles into
+single chunks at once.
+
+**A blast removes the fractured zone about what it crushes** (`fracture::strike`). A face load's
+Law 1 volume times `σ_c,d / 2σ_t,d`, at least one, is the zone (`fracture::Compaction::zone`),
+`σ_t,d` the least dynamic tension the row bears, across the grain for wood (the hoop tension is
+alike every way about the cavity, so the weakest way parts it): it spends its own chunk's pool,
+then the pools of its part's standing chunks nearest its point, and each pool it spends turns its
+chunk to dust. The ratio is the static Lamé estimate, the volume within which a cavity held at
+`σ_c,d` sets a hoop tension above `σ_t,d`, a `StandIn` for a dynamic fractured-zone law that
+measured fractured volumes against crushed volumes under contact charges would settle. Taken from
+the part's matter, the removed volume follows the burst and not the cut (**Representation**). A cell the zone wears without spending is drawn whole: the
+view cuts no dish for a face load, only for a scab's removal and a round's channel, and per-chunk
+wear past an element's first is not on the wire. The effect is server state, decided inside each
+owner's deposit evaluation and committed in the existing deposit order, parallel by owner like
+every other load.
+
 ## Local response and holes
 
 Represent surviving matter independently of baked chunk fate.
@@ -691,7 +757,7 @@ Choose refinement from convergence of aperture, residual speed, rear breakout an
 Baked chunk width is not the minimum hole diameter.
 
 **A hole is a negative volume, drawn only (owner decision).**
-A round's channel and a blast's crater dish are stored as shapes in a per-chunk hole list, carried in the record.
+A round's channel and a scab's dish are stored as shapes in a per-chunk hole list, carried in the record.
 The chunk's geometry and collider never change.
 The wall's shader skips the surface inside a hole and draws the hole's inner wall, shadow pass included, so sight passes through it.
 Rounds, mass, centroid, inertia and the structural calculation ignore holes: a later round meets the whole chunk.
@@ -749,7 +815,7 @@ interface is every live joint crossing between two parts, or from a part to the 
 stiffness and capacity are its joints': damage inside a part (removal, a cavity crack that splits
 it into two nodes) reaches an interface only through the joint area that remains, never through a
 factor. MEASURED (`parts::tests`, the shipped data): house_1 has 72 parts (its 55 elements, 17
-split at grade; 18 parts fixed in all), 180 interfaces (44 push-only), 815 bonded and 71 push-only
+split at grade; 18 parts fixed in all), 198 interfaces (44 push-only), 973 bonded and 81 push-only
 joints crossing them, 324 unknowns and 7,362 factor entries; its factorization costs 351,018
 scalar operations and one load column 28,476 (DERIVED loop counts, no timing). fir_1 is one part
 on one root-plate interface, 6 unknowns. The shipped map places 74 houses and 635 firs.
@@ -886,8 +952,9 @@ the presses on its chunks and the sustained forces its other interfaces hand it,
 hold, mortar tension included, cracks, a pulled one separates, and the part is solved again on
 what is left until it holds. The cracks then split the part, and the part law judges the pieces:
 a chunk or cluster whose faces lift, tip or slip as a mechanism separates and connectivity
-releases it. Arching is not authored: compression runs across the running bond's overlaps
-because the bed joints are where the chunks overlap. No masonry flag or per-material rule exists.
+releases it. Arching is not authored: compression runs across whatever overlaps the cut leaves,
+a running bond's bed joints in the fixture wall below, slanted cell faces in the shipped house.
+No masonry flag or per-material rule exists.
 
 MEASURED (`parts::tests`, a fixture 12-course running-bond wall, observations): a hole of 11
 bricks, three courses high and four bricks wide at the base, drops nothing with the shipped brick
@@ -1193,11 +1260,13 @@ every drawn piece and every shed still due (`decor::reconstruct`). Its lifetime 
 the oldest going first. It has no body and no collider, so no hull, round or server body meets
 it, and two players drawing one event at one cursor draw one pose.
 
-**MEASURED** on the shipped house's element with the most internal joints (66 chunks of
-0.74–48 kg, 1712 kg; no single chunk reaches the cut-off), landing on the ground. Flat, on its
-lowest course, it cracks nothing below a 0.48 m drop (DERIVED from the seams' strengths and the
-two sides' stiffness, `a_short_drop_lands_whole`; on a rigid floor, 1.1 cm); from 10 m it cracks 28
-bonds, parts 19 joints and stays one server body. Through one corner chunk, a 1 cm drop (28.6 kN
+**MEASURED** on the shipped house's element with the most internal joints (74 chunks, 1,792 kg),
+landing on the ground on its lowest chunks: it cracks nothing below a 1.1 cm drop (0.46 m/s,
+DERIVED from the seams' strengths and the two sides' stiffness, `a_short_drop_lands_whole`), its
+weakest seam slipping in cohesion-only shear first; at four times that speed it cracks 121 bonds and
+parts 109 joints into 20 fragments, the cracks taking 79 J of 3,081 J. The rest of this paragraph
+was measured on the running-bond bake, whose element was 66 chunks of 0.74–48 kg, 1,712 kg: from
+10 m it cracked 28 bonds, parted 19 joints and stayed one server body. Through one corner chunk, a 1 cm drop (28.6 kN
 peak) cracks nothing; 10 cm (114 kN) cracks 108 bonds into 21 fragments, 3 kept as server bodies;
 10 m, 44 fragments, 1 kept. The cracks absorb 82–117 J of the landing's 1.7–168 kJ. The corner's
 peak against this ground is close to the step-based force it replaced, so the corner's breakup

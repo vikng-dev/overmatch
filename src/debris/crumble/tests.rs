@@ -169,42 +169,52 @@ impl Part {
         .failures
     }
 
-    /// The least speed at which a flat landing on `against` fails a bond, m/s (DERIVED): the free
-    /// part's field is linear in the contact force (uniform gravity cancels), so at a reference
-    /// speed every failing joint's tension, shear and compression scale with the force. A tension
-    /// crack starts at the force share `k = σ_t / σ`; a shear crack, where `τ = c + μ p`, at
-    /// `k = c / (τ − μ p)`, `μ p` the capacity's friction share. The Hertz peak grows as
-    /// `(m v²)^(3/5)`, so the speed scales by `k^(5/6)`. The seams' strengths and the two sides'
-    /// stiffness come from the data.
+    /// The least speed at which a flat landing on `against` fails a bond by the field verdict
+    /// ([`Part::failures`]), m/s: a search on that verdict, so the speed is the verdict's own
+    /// onset, not a derivation independent of it. Its step assumes the free part's field linear in
+    /// the contact force (uniform gravity cancels): a tension crack starts at the force share
+    /// `k = σ_t / σ`, a shear crack, where `τ = c + μ p`, at `k = c / (τ − μ p)`, and the Hertz
+    /// peak grows as `(m v²)^(3/5)`, so the speed falls by `k^(5/6)` to the named mode's own speed,
+    /// until no bond is over or f32 no longer resolves the step (a mode read at its own speed is
+    /// over by rounding alone).
     fn threshold(&self, against: Contactor) -> f32 {
-        let reference = 100.0;
-        let (touches, _) = self.landing_on(reference, against);
-        let share = self
-            .failures(&touches)
-            .iter()
-            .map(|failure| {
-                let seam = self.structure.joints[failure.joint]
-                    .seam()
-                    .expect("a loaded internal joint of a breakable part is a bond");
-                match failure.cause {
-                    Cause::Tension => failure.capacity / failure.demand,
-                    Cause::Shear => {
-                        let cohesion = seam.shear.cohesion;
-                        let friction = failure.capacity - cohesion;
-                        cohesion / (failure.demand - friction)
+        let mut speed = 100.0;
+        loop {
+            let (touches, _) = self.landing_on(speed, against);
+            let share = self
+                .failures(&touches)
+                .iter()
+                .map(|failure| {
+                    let seam = self.structure.joints[failure.joint]
+                        .seam()
+                        .expect("a loaded internal joint of a breakable part is a bond");
+                    match failure.cause {
+                        Cause::Tension => failure.capacity / failure.demand,
+                        Cause::Shear => {
+                            let cohesion = seam.shear.cohesion;
+                            let friction = failure.capacity - cohesion;
+                            cohesion / (failure.demand - friction)
+                        }
+                        cause => {
+                            unreachable!("a bonded part fails by tension or shear, not {cause:?}")
+                        }
                     }
-                    cause => unreachable!("a bonded part fails by tension or shear, not {cause:?}"),
-                }
-            })
-            .fold(f32::INFINITY, f32::min);
-        reference * share.powf(5.0 / 6.0)
+                })
+                .fold(f32::INFINITY, f32::min);
+            let lower = speed * share.powf(5.0 / 6.0);
+            if lower.partial_cmp(&speed) != Some(std::cmp::Ordering::Less) {
+                return speed; // No bond over (an infinite share), or no step f32 resolves.
+            }
+            speed = lower;
+        }
     }
 }
 
-/// A SHORT DROP LANDS WHOLE: below the derived threshold ([`Part::threshold`], from the seams'
-/// strength data) no bond cracks and no joint parts, however much energy the drop brings; just
-/// above it a bond cracks. A mutant that spends a landing's energy on seams the field does not
-/// overload (the cheapest anywhere) cracks the short drop.
+/// A SHORT DROP LANDS WHOLE: below the speed at which the field verdict first fails a bond (a
+/// search on it, [`Part::threshold`]) the crumble cracks no bond and parts no joint, however much
+/// energy the drop brings; just above it a bond cracks. The crumble's energy budget relies on it:
+/// a mutant that spends a landing's energy on seams the field does not overload (the cheapest
+/// anywhere) cracks the short drop.
 #[test]
 fn a_short_drop_lands_whole() {
     let part = released_part();
@@ -212,7 +222,7 @@ fn a_short_drop_lands_whole() {
     let g = crate::physical_laws::gravity_mps2();
     let height = speed * speed / (2.0 * g);
     println!(
-        "MEASURED threshold: a {:.0} kg part of {} chunks cracks from a {height:.3} m drop ({speed:.3} m/s, DERIVED)",
+        "MEASURED threshold: a {:.0} kg part of {} chunks cracks from a {height:.3} m drop ({speed:.3} m/s, searched)",
         part.mass(),
         part.group.len()
     );

@@ -1119,13 +1119,13 @@ fn line_loads(structure: &Structure, lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<
         .collect()
 }
 
-/// A fixture crushed-volume load on law chunk `c` at its centroid, taking `share` of its pool, with
-/// no cavity energy, impulse or peak force: the removal half of a blast, independent of its
-/// pressure-driven section loading. ASSUMED fixture volume, not an energy-to-crush adapter.
-fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
+/// A fixture scab thrown off law chunk `c` at its centroid, taking `share` of its pool, and its
+/// removal load ([`Load::blast`]'s): no cavity energy, impulse or peak force. ASSUMED fixture
+/// volume, not a Law 2 reading.
+fn scab_on(structure: &Structure, c: usize, share: f32) -> (Vec<Load>, Vec<fracture::Scab>) {
     let chunk = &structure.chunks[c];
     let crushed = share * fracture::full_pool(chunk);
-    vec![Load {
+    let removal = Load {
         chunk: c,
         at: chunk.centroid,
         energy: 0.0,
@@ -1134,7 +1134,14 @@ fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
         peak: None,
         origin: Origin::Field,
         crushed,
-    }]
+    };
+    let scab = fracture::Scab {
+        chunk: c,
+        at: chunk.centroid,
+        mass: crushed * chunk.material.density,
+        velocity: Vec3::ZERO,
+    };
+    (vec![removal], vec![scab])
 }
 
 /// The record entries of `changes` on the composed house (ordinal 3) at `tick`.
@@ -1186,12 +1193,12 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
         Vec3::ZERO,
         STEP,
     );
-    let blast = blast_on(&authority.structure, dish_chunk, 0.05);
-    let holes = holes_of(&kind, &[], &blast);
+    let (removal, scabs) = scab_on(&authority.structure, dish_chunk, 0.05);
+    let holes = holes_of(&kind, &[], &scabs);
     let second = run_laws(
         &kind.layout.element_of,
         &mut authority,
-        &blast,
+        &removal,
         holes,
         Vec3::ZERO,
         STEP,
@@ -1407,8 +1414,8 @@ impl Volume {
 }
 
 /// A HOLE HOLDS THE VOLUME ITS LOAD CRUSHED: a line's channel (its cylinder about the chord,
-/// narrower here than the ball) holds `energy / crush` and a blast's dish (its half ball) its
-/// load's crushed volume, the volume each takes from the chunk's pool, to the millimetre rounding
+/// narrower here than the ball) holds `energy / crush` and a scab's dish (its half ball) its
+/// removal's volume, the volume each takes from the chunk's pool, to the millimetre rounding
 /// of their radius and ends. The size rule rests on it: a hole is never
 /// the size of a chunk still standing, since that volume is a spent pool and recorded as dust. A
 /// radius off by a constant factor fails here.
@@ -1441,14 +1448,14 @@ fn a_hole_holds_the_volume_its_load_crushed() {
     }
     .check();
 
-    let blast = blast_on(&structure, c, 0.01);
-    let [(_, dish)] = holes_of(&kind, &[], &blast)[..] else {
+    let (removal, scabs) = scab_on(&structure, c, 0.01);
+    let [(_, dish)] = holes_of(&kind, &[], &scabs)[..] else {
         panic!("one dish");
     };
     let r = f32::from(dish.radius) / 1000.0;
     Volume {
         held: 2.0 / 3.0 * PI * r.powi(3),
-        crushed: blast[0].crushed,
+        crushed: removal[0].crushed,
         bound: 3.0 * 0.0005 / r,
     }
     .check();
@@ -2775,41 +2782,29 @@ fn casing_loads_count_each_joule_once_and_carry_their_ejection_momentum() {
     }
 }
 
-/// ASSUMED geometry fixture selected by class: three collinear neighbours in one element,
-/// sharing two seams and a common extrusion. The data supplies every hull and mass.
+/// ASSUMED geometry fixture selected by class: three neighbours in one element, a chain joined by
+/// two seams, the ends not touching. The data supplies every hull and mass.
 fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
     let mut kind = (*shipped_house()).clone();
     let structure = kind.layout.structure(&kind.asset);
-    let adjacent = |a: usize, b: usize| {
-        kind.layout.element_of[a] == kind.layout.element_of[b]
-            && (structure.chunks[a].centroid.y - structure.chunks[b].centroid.y).abs() < 0.001
-            && !structure.chunks[a].buried
-            && !structure.chunks[b].buried
+    let joined = |a: usize, b: usize| {
+        structure.joints.iter().any(|joint| {
+            joint.b == Side::Chunk(b) && joint.a == a || joint.b == Side::Chunk(a) && joint.a == b
+        })
     };
-    let mut chosen = None;
-    for joint in &structure.joints {
-        let Side::Chunk(b) = joint.b else {
-            continue;
-        };
-        if !adjacent(joint.a, b) || joint.normal.z.abs() < 0.999 {
-            continue;
-        }
-        for other in &structure.joints {
-            let Side::Chunk(c) = other.b else {
-                continue;
-            };
-            if other.a != b || c == joint.a || !adjacent(b, c) || other.normal.z.abs() < 0.999 {
-                continue;
-            }
-            let mut group = vec![joint.a, b, c];
-            group.sort_unstable();
-            chosen = Some(group);
-            break;
-        }
-        if chosen.is_some() {
-            break;
-        }
-    }
+    let open = |c: usize| !structure.chunks[c].buried;
+    let chosen = (0..structure.chunks.len()).find_map(|b| {
+        let e = kind.layout.element_of[b];
+        let mut ends = kind
+            .layout
+            .chunks_of(usize::from(e))
+            .filter(|&c| c != b && open(c) && joined(b, c));
+        let a = ends.next()?;
+        let c = ends.find(|&c| !joined(a, c))?;
+        let mut group = vec![a, b, c];
+        group.sort_unstable();
+        open(b).then_some(group)
+    });
     let group = chosen.expect("the fixture asset contains a row of three chunks");
     let mut internal = 0;
     for joint in &mut kind.layout.joints {
@@ -3067,7 +3062,10 @@ fn split_children_inherit_the_parents_rigid_momentum() {
             + 0.5 * spin.0.dot(inertia * spin.0);
     }
     assert!((sum_p - momentum).length() <= 1e-4 * momentum.length());
-    assert!((sum_l - angular).length() <= 1e-4 * angular.length());
+    // Resolution: each child's lever `at − centre` is a difference of f32 positions near the root,
+    // each off by up to an ulp of the root's distance (DERIVED), times the momentum it carries.
+    let levers = 2.0 * f32::EPSILON * root.translation.length() * momentum.length();
+    assert!((sum_l - angular).length() <= 1e-4 * angular.length() + levers);
     assert!((sum_e - energy).abs() <= 1e-4 * energy);
     assert!((sum_mass - total_mass).abs() < 1e-5 * total_mass);
 }
@@ -3805,7 +3803,8 @@ fn a_freed_chunk_moves_as_the_material_it_occupies() {
         );
     }
     let (_, [c, other, _]) = fixture_chunks(&kind);
-    let (mut app, (mass, inertia, centre)) = freed_in_place(&[c, other], Vec3::ZERO);
+    let (mut app, (mass, inertia, centre)) =
+        freed_in_place(&[c.min(other), c.max(other)], Vec3::ZERO);
     app.update();
     let mut bodies = app.world_mut().query_filtered::<(
         &ComputedMass,
@@ -5610,43 +5609,8 @@ fn resolved_column() -> Arc<ConstructionKind> {
 
 /// Fixture: a column scaled uniformly, with geometry, mass and joint areas kept consistent.
 fn scaled_column(scale: f32) -> Arc<ConstructionKind> {
-    let mut asset = column_construction().asset.clone();
-    let point = |p: &mut [f32; 3]| {
-        for x in p {
-            *x *= scale;
-        }
-    };
-    asset.foundation_y_m *= scale;
-    for element in &mut asset.elements {
-        for p in &mut element.hull {
-            point(p);
-        }
-    }
-    for chunk in &mut asset.chunks {
-        for p in &mut chunk.hull {
-            point(p);
-        }
-        point(&mut chunk.centroid);
-        chunk.volume_m3 *= scale.powi(3);
-        chunk.mass_kg *= scale.powi(3);
-    }
-    for joint in &mut asset.joints {
-        point(&mut joint.centroid);
-        joint.area_m2 *= scale.powi(2);
-    }
-    for anchor in &mut asset.anchors {
-        point(&mut anchor.centroid);
-        anchor.area_m2 *= scale.powi(2);
-    }
-    Arc::new(
-        ConstructionKind::resolve(
-            &asset.id,
-            &ron::ser::to_string(&asset).unwrap(),
-            crate::substances::SubstanceRegistry::shipped_static(),
-            Attachments::shipped_static(),
-        )
-        .unwrap(),
-    )
+    let column = column_construction().asset.clone();
+    Arc::new(crate::construction::tests::scaled(column, scale).expect("a scaled column loads"))
 }
 
 /// The game's environment destruction keeps a resolved hull plug's matter and rigid motion.

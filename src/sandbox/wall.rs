@@ -1199,14 +1199,14 @@ struct Applied {
 fn cut_holes(
     cut: &model::Cut,
     lines: &[(usize, Vec3, Vec3, f32)],
-    blast: &[Load],
+    scabs: &[model::Scab],
 ) -> Vec<(usize, crate::construction::breakage::Hole)> {
     crate::construction::breakage::cut_holes(
         &cut.blocks,
         |c| cut.structure.chunks[c].centroid,
-        |c| cut.structure.chunks[c].material.crush,
+        |c| cut.structure.chunks[c].material,
         lines,
-        blast,
+        scabs,
     )
 }
 
@@ -1295,7 +1295,7 @@ fn apply_deposit(
                 contacts: &contacts,
             });
             applied.scabs = scabs.len();
-            let holes = cut_holes(&wall.cut, &[], &loads);
+            let holes = cut_holes(&wall.cut, &[], &scabs);
             (loads, holes)
         }
     };

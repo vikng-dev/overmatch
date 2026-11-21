@@ -146,9 +146,9 @@ impl ConstructionKind {
         let layout = breakage::Layout::of(&asset, &law_materials, attachments)?;
         let structure = Arc::new(layout.checked_structure(&asset)?);
         let equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&structure));
-        Ok(Self {
+        let kind = Self {
             sweep: sweep::Geometry::new(&layout.blocks, &structure)?,
-            dressing: view::Dressing::bare(&layout),
+            dressing: view::Dressing::bare(&layout)?,
             asset,
             materials,
             friction,
@@ -157,7 +157,14 @@ impl ConstructionKind {
             layout,
             structure,
             equilibrium,
-        })
+        };
+        view::refuse_folds(&kind, |e| {
+            let name = &kind.asset.materials[usize::from(kind.asset.elements[e].material)];
+            registry.visual(name).ok_or_else(|| {
+                format!("substance {name:?} names no visual; author one in materials.ron")
+            })
+        })?;
+        Ok(kind)
     }
 
     /// The friction element `k`'s colliders carry, standing or loose: its substance's.
@@ -410,6 +417,43 @@ pub(crate) mod tests {
                 Attachments::shipped_static(),
             )
             .unwrap(),
+        )
+    }
+
+    /// Fixture: `asset` scaled uniformly by `scale`, its geometry, masses and areas kept
+    /// consistent, through the loader.
+    pub(crate) fn scaled(
+        mut asset: ConstructionAsset,
+        scale: f32,
+    ) -> Result<ConstructionKind, String> {
+        let point = |p: &mut [f32; 3]| {
+            for x in p {
+                *x *= scale;
+            }
+        };
+        asset.foundation_y_m *= scale;
+        for element in &mut asset.elements {
+            element.hull.iter_mut().for_each(point);
+        }
+        for chunk in &mut asset.chunks {
+            chunk.hull.iter_mut().for_each(point);
+            point(&mut chunk.centroid);
+            chunk.volume_m3 *= scale.powi(3);
+            chunk.mass_kg *= scale.powi(3);
+        }
+        for joint in &mut asset.joints {
+            point(&mut joint.centroid);
+            joint.area_m2 *= scale.powi(2);
+        }
+        for anchor in &mut asset.anchors {
+            point(&mut anchor.centroid);
+            anchor.area_m2 *= scale.powi(2);
+        }
+        ConstructionKind::resolve(
+            &asset.id,
+            &ron::ser::to_string(&asset).expect("a construction asset serializes"),
+            crate::substances::SubstanceRegistry::shipped_static(),
+            Attachments::shipped_static(),
         )
     }
 

@@ -1,0 +1,19 @@
+// View only, keyed by material visual (`src/construction/view/relief.rs`): how a break in a
+// construction of that visual is drawn. Neither the collider nor the wire reads this file. Lengths
+// in metres, colours linear.
+{
+    "brick": (
+        amplitude_m: (0.016, Taste("fresh masonry silhouette: centimetre-scale chips off a break edge; also the largest gap between drawn matter and its collider")),
+        wavelength_m: (0.09, Taste("fresh masonry silhouette: relief varies within a third of a brick's length")),
+        edge_pitch_m: (0.04, Resolution("an edge a break reaches is cut every 4 cm: two samples per half wavelength resolve its relief at a few vertices per brick")),
+        units: Some((
+            mortar_linear: ((0.50, 0.46, 0.38), Taste("fresh masonry optics: a joint's mortar, light warm grey, lighter than the clay")),
+            joint_m: (0.018, Measured("brick_wall_006's diffuse: its bed joints' row luminance, folded over one course, stays above half its peak for about 6 of its 341 px per metre")),
+            course_m: (0.076923, Measured("brick_wall_006's diffuse holds 39 bed joints per 3 m repeat: its row luminance's spectrum peaks at 39 cycles")),
+            course_phase_m: (0.0, Measured("brick_wall_006's bed joints lie on its image rows 0 mod 26.3 px, and a wall face's image row is −y × 1024 / 3 at authored size, so a joint lies on y = 0 in the construction frame")),
+            head_m: (0.142857, Measured("brick_wall_006's diffuse holds 21 head joints per 3 m along a course: the column luminance spectra of its courses' brick rows, summed, peak at 21 cycles")),
+            leaf_m: (0.13, Unknown("one leaf of a wall's depth, the photograph showing none: ASSUMED a 120 mm brick (the GOST 250 × 120 × 65 mm brick the fixture house states) and a 10 mm joint. Settled by a section of a wall laid in this brick")),
+            stagger: (0.5, Derived("a running bond's half unit: brick_wall_006's consecutive courses' 21-cycle head phases differ by 0.40 of a head on average, folded into [0, 0.5], which a half-head shift with scatter gives, folding pulling the scatter below one half")),
+        )),
+    ),
+}
