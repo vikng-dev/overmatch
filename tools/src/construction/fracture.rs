@@ -174,17 +174,6 @@ impl PlanarRule {
 /// could be kept.
 pub fn chunks(piece: &Piece, asset: &str) -> Result<Vec<Polyhedron>, String> {
     let solid = &piece.solid;
-    let inside = |p: DVec3| {
-        solid
-            .faces
-            .iter()
-            .all(|face| face.normal.dot(p) < face.offset)
-    };
-    // Grid squares `[lo, hi)` along `axis` at `pitch` covering the solid.
-    let range = |axis: DVec3, pitch: f64| {
-        let (lo, hi) = solid.extent(axis);
-        (lo / pitch).floor() as i64..(hi / pitch).ceil() as i64
-    };
     match &piece.pattern {
         Pattern::Whole => Ok(vec![solid.clone()]),
         Pattern::Planar(_) if sliver(solid) => Err(format!(
@@ -192,33 +181,13 @@ pub fn chunks(piece: &Piece, asset: &str) -> Result<Vec<Polyhedron>, String> {
              piece Whole or widen it",
             piece.name
         )),
-        Pattern::Planar(Planar { depth, rule }) => {
-            let (pitch, keep) = (rule.pitch_m.0, rule.keep_share.0);
-            let (e1, e2) = plane_basis(*depth);
-            let (near, far) = solid.extent(*depth);
-            let (ri, rj) = (range(e1, pitch), range(e2, pitch));
-            let mut sites = Vec::new();
-            for i in ri {
-                for j in rj.clone() {
-                    let square = [i, j].map(|k| k.to_string());
-                    let mut stream =
-                        Stream::new(&[asset, &piece.name, "planar", &square[0], &square[1]]);
-                    let site = e1 * ((i as f64 + stream.unit()) * pitch)
-                        + e2 * ((j as f64 + stream.unit()) * pitch)
-                        + *depth * (0.5 * (near + far));
-                    if stream.unit() < keep && inside(site) {
-                        sites.push(site);
-                    }
-                }
-            }
-            Ok(without_slivers(solid, sites))
-        }
+        Pattern::Planar(planar) => Ok(without_slivers(solid, planar_sites(piece, asset, planar))),
         Pattern::Cells(rule) => {
             let (size, stretch) = (rule.size_m.0, rule.stretch.0);
             let grain = grain(piece.surface_frame);
             let (e1, e2) = plane_basis(grain);
             let axes = [(e1, size), (e2, size), (grain, size * stretch)];
-            let [ri, rj, rl] = axes.map(|(axis, pitch)| range(axis, pitch));
+            let [ri, rj, rl] = axes.map(|(axis, pitch)| squares(solid, axis, pitch));
             let mut sites = Vec::new();
             for i in ri {
                 for j in rj.clone() {
@@ -237,7 +206,7 @@ pub fn chunks(piece: &Piece, asset: &str) -> Result<Vec<Polyhedron>, String> {
                             .zip(axes)
                             .map(|(&k, (axis, pitch))| axis * ((k as f64 + stream.unit()) * pitch))
                             .sum::<DVec3>();
-                        if inside(site) {
+                        if inside(solid, site) {
                             sites.push(site);
                         }
                     }
@@ -249,6 +218,41 @@ pub fn chunks(piece: &Piece, asset: &str) -> Result<Vec<Polyhedron>, String> {
             }))
         }
     }
+}
+
+/// The sites of `piece`'s `planar` cut, before any sliver's is dropped: in each grid square of
+/// `pitch_m` across the depth, a point drawn in it on the solid's mid-depth plane, kept at
+/// `keep_share` where it lies inside; `asset` and the piece's name seed every draw.
+pub(super) fn planar_sites(piece: &Piece, asset: &str, planar: &Planar) -> Vec<DVec3> {
+    let (solid, Planar { depth, rule }) = (&piece.solid, planar);
+    let (pitch, keep) = (rule.pitch_m.0, rule.keep_share.0);
+    let (e1, e2) = plane_basis(*depth);
+    let (near, far) = solid.extent(*depth);
+    let mut sites = Vec::new();
+    for i in squares(solid, e1, pitch) {
+        for j in squares(solid, e2, pitch) {
+            let square = [i, j].map(|k| k.to_string());
+            let mut stream = Stream::new(&[asset, &piece.name, "planar", &square[0], &square[1]]);
+            let site = e1 * ((i as f64 + stream.unit()) * pitch)
+                + e2 * ((j as f64 + stream.unit()) * pitch)
+                + *depth * (0.5 * (near + far));
+            if stream.unit() < keep && inside(solid, site) {
+                sites.push(site);
+            }
+        }
+    }
+    sites
+}
+
+/// Whether `p` lies strictly inside `solid`.
+fn inside(solid: &Polyhedron, p: DVec3) -> bool {
+    (solid.faces.iter()).all(|face| face.normal.dot(p) < face.offset)
+}
+
+/// The grid squares `[lo, hi)` along `axis` at `pitch` covering `solid`.
+fn squares(solid: &Polyhedron, axis: DVec3, pitch: f64) -> std::ops::Range<i64> {
+    let (lo, hi) = solid.extent(axis);
+    (lo / pitch).floor() as i64..(hi / pitch).ceil() as i64
 }
 
 /// Resolution: two corners of one chunk closer than this (m) bound a sliver, dropped with its

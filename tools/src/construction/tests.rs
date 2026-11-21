@@ -532,11 +532,11 @@ fn cells_partition_their_piece() {
 
 /// A PLANAR CUT RUNS THROUGH THE WHOLE DEPTH AND LEAVES NO SLIVER: on a slab whose depth runs off
 /// every axis, the chunks sum to the slab, each chunk's every face is the slab's own or parallel to
-/// the depth, and no chunk holds two corners nearer than [`fracture::SLIVER_M`]; four sites
-/// placed by hand whose cells hold a sliver lose it to the drop. The view draws a break across the
-/// wall's thickness and the contact hull rests on no sliver; a slab thinner than a sliver is
-/// refused rather than baked whole. Mutants: sites off the mid-depth plane, no sliver drop, or no
-/// refusal fail here. Fixture: a 1.2 × 0.9 m slab 0.25 m deep, sites 0.06 m apart.
+/// the depth, and no chunk holds two corners nearer than [`fracture::SLIVER_M`], though the cut's
+/// own sites cut slivers. The view draws a break across the wall's thickness and the contact hull
+/// rests on no sliver; a slab thinner than a sliver is refused rather than baked whole. Mutants:
+/// sites off the mid-depth plane, a cut that keeps its slivers, or no refusal fail here. Fixture:
+/// a 1.2 × 0.9 m slab 0.25 m deep, sites 0.06 m apart.
 #[test]
 fn a_planar_cut_runs_through_the_depth_and_leaves_no_sliver() {
     let depth = DVec3::new(1.0, 0.3, 2.0).normalize();
@@ -570,24 +570,13 @@ fn a_planar_cut_runs_through_the_depth_and_leaves_no_sliver() {
     assert!(err.contains("slab") && err.contains("Whole"), "{err}");
     piece.solid = slab(0.25);
     let slab = &piece.solid;
-    // Nearly cocircular, so their bisectors meet in two corners 2 mm apart (DERIVED: (b² − a²) / b
-    // for a = 0.2 m and b = 0.201 m).
-    let centre = u * 0.6 + v * 0.45 + depth * 0.125;
-    let sites = vec![
-        centre - u * 0.2,
-        centre + u * 0.2,
-        centre + v * 0.201,
-        centre - v * 0.201,
-    ];
+    let Pattern::Planar(planar) = &piece.pattern else {
+        panic!("the fixture is a planar cut")
+    };
+    let sites = fracture::planar_sites(&piece, "fixture", planar);
     assert!(
-        fracture::voronoi(slab, &sites, |v| v)
-            .iter()
-            .any(fracture::sliver)
-    );
-    assert!(
-        !fracture::without_slivers(slab, sites)
-            .iter()
-            .any(fracture::sliver)
+        (fracture::voronoi(slab, &sites, |v| v).iter()).any(fracture::sliver),
+        "the fixture's own sites cut a sliver"
     );
     let cut = fracture::chunks(&piece, "fixture").unwrap();
     assert!(cut.len() > 1, "the fixture is cut");
