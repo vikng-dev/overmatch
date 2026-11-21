@@ -5609,43 +5609,8 @@ fn resolved_column() -> Arc<ConstructionKind> {
 
 /// Fixture: a column scaled uniformly, with geometry, mass and joint areas kept consistent.
 fn scaled_column(scale: f32) -> Arc<ConstructionKind> {
-    let mut asset = column_construction().asset.clone();
-    let point = |p: &mut [f32; 3]| {
-        for x in p {
-            *x *= scale;
-        }
-    };
-    asset.foundation_y_m *= scale;
-    for element in &mut asset.elements {
-        for p in &mut element.hull {
-            point(p);
-        }
-    }
-    for chunk in &mut asset.chunks {
-        for p in &mut chunk.hull {
-            point(p);
-        }
-        point(&mut chunk.centroid);
-        chunk.volume_m3 *= scale.powi(3);
-        chunk.mass_kg *= scale.powi(3);
-    }
-    for joint in &mut asset.joints {
-        point(&mut joint.centroid);
-        joint.area_m2 *= scale.powi(2);
-    }
-    for anchor in &mut asset.anchors {
-        point(&mut anchor.centroid);
-        anchor.area_m2 *= scale.powi(2);
-    }
-    Arc::new(
-        ConstructionKind::resolve(
-            &asset.id,
-            &ron::ser::to_string(&asset).unwrap(),
-            crate::substances::SubstanceRegistry::shipped_static(),
-            Attachments::shipped_static(),
-        )
-        .unwrap(),
-    )
+    let column = column_construction().asset.clone();
+    Arc::new(crate::construction::tests::scaled(column, scale).expect("a scaled column loads"))
 }
 
 /// The game's environment destruction keeps a resolved hull plug's matter and rigid motion.

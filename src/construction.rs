@@ -420,6 +420,43 @@ pub(crate) mod tests {
         )
     }
 
+    /// Fixture: `asset` scaled uniformly by `scale`, its geometry, masses and areas kept
+    /// consistent, through the loader.
+    pub(crate) fn scaled(
+        mut asset: ConstructionAsset,
+        scale: f32,
+    ) -> Result<ConstructionKind, String> {
+        let point = |p: &mut [f32; 3]| {
+            for x in p {
+                *x *= scale;
+            }
+        };
+        asset.foundation_y_m *= scale;
+        for element in &mut asset.elements {
+            element.hull.iter_mut().for_each(point);
+        }
+        for chunk in &mut asset.chunks {
+            chunk.hull.iter_mut().for_each(point);
+            point(&mut chunk.centroid);
+            chunk.volume_m3 *= scale.powi(3);
+            chunk.mass_kg *= scale.powi(3);
+        }
+        for joint in &mut asset.joints {
+            point(&mut joint.centroid);
+            joint.area_m2 *= scale.powi(2);
+        }
+        for anchor in &mut asset.anchors {
+            point(&mut anchor.centroid);
+            anchor.area_m2 *= scale.powi(2);
+        }
+        ConstructionKind::resolve(
+            &asset.id,
+            &ron::ser::to_string(&asset).expect("a construction asset serializes"),
+            crate::substances::SubstanceRegistry::shipped_static(),
+            Attachments::shipped_static(),
+        )
+    }
+
     /// The immutable shipped fixture, resolved through the real loader once per test process.
     /// Loader refusal tests read their own inputs; sharing this fixture repeats no hull construction.
     pub(crate) fn shipped_house() -> Arc<ConstructionKind> {

@@ -684,9 +684,11 @@ rammed wall gave way sooner than the bond had: an observation, not a target.
 wavelength of its edges, moves, by one field of position (value noise, `amplitude_m` and
 `wavelength_m`, both `Taste`) scaled down to nothing a wavelength from the break and faded against
 its element's hull planes: faces sharing an edge draw one curve, a piece fits the hole it left, and
-the element's silhouette never moves. Every other face draws exactly as it did. The field is a
-contraction (`MAX_WARP_SLOPE`), so no drawn outline folds; the load gate sweeps every open face
-(`view::refuse_folds`). Displaced geometry was chosen over a shader that erodes the silhouette: it gives a real
+the element's silhouette never moves. Every other face draws exactly as it did. The load gate
+(`view::refuse_folds`) proves every face of a relieved chunk, hull or cut, unfolded at every reach
+its breaks could give it, so no drawn outline folds. A bound on the field alone was rejected: a
+contraction keeps the continuous image of a face simple but not the chords the draw joins its
+points by, and a face a few millimetres wide folds under it. Displaced geometry was chosen over a shader that erodes the silhouette: it gives a real
 outline, self-shadowing and shadows. Relief on every face of every swapped chunk was rejected: an
 intact house drew 16,804 triangles in 14.2 ms (MEASURED on the first experiment). A break face shows
 its substance's exposed colour, with mortar where the wall's bed, head and leaf joint planes cross
@@ -707,7 +709,7 @@ MEASURED view cost (`edit` profile, best of five; main is the running-bond bake 
 | every chunk its own piece | 13,796 tris, 6.6 ms | 160,736 tris, 82 ms |
 | every joint cracked | 19,166 tris, 1.5 ms | 20,496 tris, 2.5 ms |
 | chunk adjacency, once per kind | none | 0.52 ms |
-| fold sweep, once per kind at load (`view::refuse_folds`) | none | 57 ms |
+| fold sweep, once per kind at load (`view::refuse_folds`) | none | 74 ms (one run) |
 
 The most relief is every chunk drawn as its own piece: each open face cut every `edge_pitch_m`
 along its edges. A piece of several chunks draws fewer, its inner faces flat. No cap: the

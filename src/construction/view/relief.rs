@@ -15,7 +15,7 @@
 //!   than `amplitude_m`. An edge a break reaches is cut every `edge_pitch_m` from its lexically
 //!   first end, so each face drawing it draws the same points.
 //! - **Triangles.** A face with a moved point ear-clips its drawn outline seen along its normal,
-//!   which never folds ([`MAX_WARP_SLOPE`], [`Relief::first_fold`]). An open face takes smooth
+//!   which the load gate proves no break folds ([`refuse_folds`]). An open face takes smooth
 //!   normals; another keeps its plane's.
 //! - **Optics.** A cut face is core: its substance's exposed colour, with its visual's [`Units`]
 //!   drawn where the construction's joint planes cross it (`construction_surface.wesl` owns the
@@ -23,6 +23,8 @@
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
+
+use bevy::math::DVec2;
 
 use super::*;
 use crate::provenance::Sourced;
@@ -56,15 +58,6 @@ struct Units {
     leaf_m: Sourced<f32>,
     stagger: Sourced<f32>,
 }
-
-/// The largest `amplitude_m / wavelength_m` that keeps a drawn outline simple. With `r` that ratio,
-/// the displacement's Jacobian has Frobenius norm at most `(2 √3 + 2) r`: the noise's `2 √3 r`
-/// (each component changes by at most `2 amplitude / (√3 wavelength)` per metre along each axis),
-/// the hull fades' `r` (orthonormal directions, each weight changing by at most `1 / wavelength`
-/// per metre against at most `amplitude` of displacement, however many fade) and the reach's `r`.
-/// Below `1 / (2 + 2 √3)` the displacement is a contraction, so its image of any plane is
-/// one-to-one seen along that plane's normal, and a convex outline stays simple (DERIVED).
-const MAX_WARP_SLOPE: f32 = 0.183;
 
 /// The relief of `visual`, `None` for a visual drawn as its bare hull.
 pub(super) fn of(visual: &str) -> Option<&'static Relief> {
@@ -112,19 +105,20 @@ fn parse(text: &str) -> Result<BTreeMap<String, Relief>, String> {
     Ok(reliefs)
 }
 
-/// Refuses construction `kind` where a relieved chunk drawn alone, every cut face of it open, folds
-/// one: an open face's every point lies on a break, so its drawn outline is the same beside any
-/// break, and this sweep holds every open face it will draw. `visual` names each element's.
+/// Refuses construction `kind` where some break could fold a face of a relieved chunk
+/// ([`Relief::may_fold`]), so no face the draw ear-clips folds. `visual` names each element's.
 pub(crate) fn refuse_folds<'a>(
     kind: &ConstructionKind,
     visual: impl Fn(usize) -> Result<&'a str, String>,
 ) -> Result<(), String> {
     for e in 0..kind.layout.element_blocks.len() {
         let visual = visual(e)?;
-        if let Some(c) = of(visual).and_then(|relief| relief.first_fold(kind, e)) {
+        if let Some(relief) = of(visual)
+            && let Some(c) = kind.layout.chunks_of(e).find(|&c| relief.may_fold(kind, c))
+        {
             return Err(format!(
-                "chunk {c}: {visual}'s relief folds a break's outline there; lower {FILE}: \
-                 {visual}.amplitude_m"
+                "chunk {c}: a break could fold a face's outline under {visual}'s relief; lower \
+                 {FILE}: {visual}.amplitude_m"
             ));
         }
     }
@@ -256,14 +250,6 @@ impl Relief {
                 return Err((field, "use a positive finite length".into()));
             }
         }
-        if self.amplitude_m.0 > MAX_WARP_SLOPE * self.wavelength_m.0 {
-            return Err((
-                "amplitude_m",
-                format!(
-                    "keep it within {MAX_WARP_SLOPE} × wavelength_m, or a break outline can fold"
-                ),
-            ));
-        }
         self.units.as_ref().map_or(Ok(()), Units::check)
     }
 
@@ -307,12 +293,9 @@ impl Relief {
         }
     }
 
-    /// Edge `a`–`b`'s points from `a`, its far end left to the next edge: `a`, then, where a break
-    /// `near` it reaches the edge, a point every `edge_pitch_m` (module doc).
-    fn points(&self, a: Vec3, b: Vec3, near: &[(Vec3, Vec3)]) -> Vec<Vec3> {
-        if near.is_empty() {
-            return vec![a];
-        }
+    /// Edge `a`–`b`'s points from `a` as a reached edge draws them, its far end left to the next
+    /// edge: `a`, then a point every `edge_pitch_m` (module doc).
+    fn samples(&self, a: Vec3, b: Vec3) -> Vec<Vec3> {
         let (lo, hi) = if key(a) <= key(b) { (a, b) } else { (b, a) };
         let steps = (lo.distance(hi) / self.edge_pitch_m.0).ceil().max(1.0) as usize;
         let mut inner: Vec<Vec3> = (1..steps)
@@ -321,15 +304,21 @@ impl Relief {
         if lo != a {
             inner.reverse();
         }
-        let reached = [a, b]
-            .iter()
-            .chain(&inner)
-            .any(|&p| reach(near, p, self.wavelength_m.0) > 0.0);
         let mut points = vec![a];
-        if reached {
-            points.extend(inner);
-        }
+        points.extend(inner);
         points
+    }
+
+    /// Edge `a`–`b`'s points from `a`, its far end left to the next edge: its [`Self::samples`]
+    /// where a break `near` it reaches the edge, else `a` alone.
+    fn points(&self, a: Vec3, b: Vec3, near: &[(Vec3, Vec3)]) -> Vec<Vec3> {
+        if near.is_empty() {
+            return vec![a];
+        }
+        let samples = self.samples(a, b);
+        let reached =
+            (samples.iter().chain([&b])).any(|&p| reach(near, p, self.wavelength_m.0) > 0.0);
+        if reached { samples } else { vec![a] }
     }
 
     /// Chunk `c`'s faces as drawn beside `breaks`, in [`Block::faces`] order (module doc).
@@ -375,13 +364,31 @@ impl Relief {
             .collect()
     }
 
-    /// Element `e`'s first chunk drawn alone whose open face's drawn outline folds, if any.
-    fn first_fold(&self, kind: &ConstructionKind, e: usize) -> Option<usize> {
-        kind.layout.chunks_of(e).find(|&c| {
-            let alone = Breaks::of(kind, e, &|o| o == c);
-            (self.outlines(kind, c, &alone).iter())
-                .any(|face| face.open && ears(&face.flat(&face.drawn)).is_none())
-        })
+    /// Whether some break could fold a face of chunk `c`, hull or cut ([`Self::face_may_fold`]).
+    fn may_fold(&self, kind: &ConstructionKind, c: usize) -> bool {
+        let hull = &kind.layout.element_blocks[usize::from(kind.layout.element_of[c])].planes;
+        (kind.layout.blocks[c].faces().into_iter())
+            .any(|(n, corners)| self.face_may_fold(hull, n, &corners))
+    }
+
+    /// Whether some break could fold the face of outward normal `n` and law `corners` in the
+    /// element bounded by `hull` ([`folds`]): its edges sampled as a reached edge is, each point
+    /// moved by its shift times its reach, which changes by at most `1 / wavelength_m` per metre
+    /// ([`reach`]). Any break draws the face as that outline at the reach the break gives, less the
+    /// points no break reaches, which lie on its law edges.
+    fn face_may_fold(&self, hull: &[(Vec3, f32)], n: Vec3, corners: &[Vec3]) -> bool {
+        let slope = 1.0 / f64::from(self.wavelength_m.0);
+        let t = (corners[1] - corners[0]).normalize();
+        let b = n.cross(t);
+        let flat = |v: Vec3| DVec2::new(f64::from(v.dot(t)), f64::from(v.dot(b)));
+        let points: Vec<Vec3> = (edges(corners))
+            .flat_map(|(a, b)| self.samples(a, b))
+            .collect();
+        let law: Vec<DVec2> = points.iter().map(|&p| flat(p)).collect();
+        let shift: Vec<DVec2> = (points.iter())
+            .map(|&p| flat(self.shift(p, hull)))
+            .collect();
+        folds(&law, &shift, slope)
     }
 
     /// Chunk `c` of element `look`'s faces, drawn `offset` back and tagged `tag`, beside `breaks`
@@ -486,8 +493,8 @@ impl Outline {
     /// Its triangles over `drawn`, each facing out.
     fn triangles(&self) -> Vec<[usize; 3]> {
         ears(&self.flat(&self.drawn)).expect(
-            "a drawn outline never folds: MAX_WARP_SLOPE bounds the field, the load gate's \
-             refuse_folds swept every open face",
+            "a drawn outline is simple and counter-clockwise: the load gate's refuse_folds \
+             proved every relieved face so at every reach",
         )
     }
 
@@ -551,6 +558,81 @@ pub(super) fn across(layout: &Layout) -> Result<Vec<Vec<Option<Vec<u16>>>>, Stri
         }
     }
     Ok(across)
+}
+
+/// Resolution: a drawn outline keeps each point this far (m) from every edge it does not end, at
+/// every reach: a hundred times [`ON_EAR_M`], so the clipper never reads two parts of it as
+/// touching.
+const FOLD_MARGIN_M: f64 = 1e-4;
+
+/// Whether some reach could fold the outline `law`, seen along its normal and counter-clockwise,
+/// each point moved by its `shift` times a reach in `[0, 1]` that changes by at most `slope` per
+/// metre: bring a point within [`FOLD_MARGIN_M`] of an edge it does not end. At no reach it is
+/// its law face, simple; a reach scaled down to none stays a reach, and an outline turns
+/// non-simple only through a point meeting such an edge, so one that no reach brings that close is
+/// simple and counter-clockwise at every reach (DERIVED).
+fn folds(law: &[DVec2], shift: &[DVec2], slope: f64) -> bool {
+    let n = law.len();
+    (0..n).any(|i| {
+        (0..n).filter(|&j| i != j && i != (j + 1) % n).any(|j| {
+            let k = (j + 1) % n;
+            let (p, a, b) = (law[i], law[j], law[k]);
+            let t = ((p - a).dot(b - a) / a.distance_squared(b)).clamp(0.0, 1.0);
+            let moved = shift[i].length() + shift[j].length().max(shift[k].length());
+            if p.distance(a.lerp(b, t)) > moved + FOLD_MARGIN_M {
+                return false; // No point moves farther than its shift.
+            }
+            // Reach ρ at `p`, ρ + α at `a` and ρ + β at `b`.
+            let offsets = (p.distance(a) * slope, p.distance(b) * slope);
+            let at = |rho: f64, alpha: f64, beta: f64| {
+                (
+                    p + shift[i] * rho,
+                    a + shift[j] * (rho + alpha),
+                    b + shift[k] * (rho + beta),
+                )
+            };
+            let longest = a.distance(b)
+                + shift[j].length() * (1.0 + offsets.0)
+                + shift[k].length() * (1.0 + offsets.1);
+            // Clear of the edge's line on its inner side, or before its start, or past its end.
+            let clear = [
+                least(offsets, |r, x, y| {
+                    let (p, a, b) = at(r, x, y);
+                    (b - a).perp_dot(p - a)
+                }),
+                least(offsets, |r, x, y| {
+                    let (p, a, b) = at(r, x, y);
+                    (a - p).dot(b - a)
+                }),
+                least(offsets, |r, x, y| {
+                    let (p, a, b) = at(r, x, y);
+                    (b - p).dot(a - b)
+                }),
+            ];
+            clear.into_iter().fold(f64::NEG_INFINITY, f64::max) < FOLD_MARGIN_M * longest
+        })
+    })
+}
+
+/// The least of `f(ρ, α, β)` over a reach `ρ` in `[0, 1]` and offsets `|α| ≤ da`, `|β| ≤ db`, for
+/// an `f` quadratic in `ρ` whose least over the offsets lies at their corners at every `ρ`: each
+/// of [`folds`]' tests, bilinear in them or concave in one and linear in the other.
+fn least((da, db): (f64, f64), f: impl Fn(f64, f64, f64) -> f64) -> f64 {
+    let mut least = f64::INFINITY;
+    for alpha in [-da, da] {
+        for beta in [-db, db] {
+            // f(ρ) = f0 + c1 ρ + c2 ρ², from its values at 0, ½ and 1.
+            let [f0, half, f1] = [0.0, 0.5, 1.0].map(|rho| f(rho, alpha, beta));
+            let c2 = 2.0 * (f0 - 2.0 * half + f1);
+            let c1 = f1 - f0 - c2;
+            let vertex = -c1 / (2.0 * c2);
+            least = least.min(f0).min(f1);
+            if c2 > 0.0 && (0.0..1.0).contains(&vertex) {
+                least = least.min(f0 + (c1 + c2 * vertex) * vertex);
+            }
+        }
+    }
+    least
 }
 
 /// Ear clipping of the polygon `points`, counter-clockwise, taking the fattest ear each time, or
@@ -734,8 +816,7 @@ mod tests {
     /// outward triangles ([`assert_drawn`]), a neighbour's face toward the gone chunk matches the
     /// piece's face toward it, and two neighbours draw the face they share alike. The view relies
     /// on it for a rim without slits or dark facets and a piece that fits its hole. An open set
-    /// per chunk, an edge sampled from its own start, a warp read in a piece's frame, or a field
-    /// steeper than its fold bound fails it.
+    /// per chunk, an edge sampled from its own start, or a warp read in a piece's frame fails it.
     #[test]
     fn a_break_draws_closed_surfaces_that_agree_across_it() {
         let kind = shipped_house();
@@ -856,41 +937,65 @@ mod tests {
         }
     }
 
-    /// A RELIEF STEEPER THAN ITS FOLD BOUND IS REFUSED, naming the field: past `MAX_WARP_SLOPE` a
-    /// break's outline can fold, which every drawn face's triangles rely on not happening.
+    /// NO BREAK FOLDS A FACE THE LOAD GATE PASSES: under a relief four times the shipped
+    /// amplitude (fixture), each relieved chunk of the shipped house is drawn beside each of its
+    /// own edges broken alone; every face, hull or cut, that draws an outline that is not simple or
+    /// does not ear-clip is one the gate holds ([`Relief::face_may_fold`]), and some do. The
+    /// draw's never-fold panic relies on it for every face any break draws. A gate over a face's
+    /// law corners alone, blind to the chords the draw joins its edge points by, fails here.
     #[test]
-    fn a_relief_steeper_than_its_fold_bound_is_refused() {
+    fn no_break_folds_a_face_the_load_gate_passes() {
+        let kind = shipped_house();
         let (_, mut steep) = (parse(SHIPPED)
             .expect("the shipped reliefs")
             .into_iter()
             .next())
         .expect("a shipped relief");
-        assert_eq!(steep.check(), Ok(()));
-        steep.amplitude_m.0 = 1.01 * MAX_WARP_SLOPE * steep.wavelength_m.0;
-        assert_eq!(
-            steep.check().map_err(|(field, _)| field),
-            Err("amplitude_m")
-        );
+        steep.amplitude_m.0 *= 4.0;
+        let mut folded = 0;
+        for c in (0..kind.layout.blocks.len()).filter(|&c| relief_of(&kind, c).is_some()) {
+            let hull = &kind.layout.element_blocks[usize::from(kind.layout.element_of[c])].planes;
+            let mut seen = HashSet::new();
+            for broken in (kind.layout.blocks[c].faces().iter())
+                .flat_map(|(_, corners)| edges(corners))
+                .filter(|&(a, b)| seen.insert(edge(a, b)))
+            {
+                let breaks = Breaks {
+                    open: HashSet::new(),
+                    edges: vec![broken],
+                };
+                for face in steep.outlines(&kind, c, &breaks) {
+                    let flat = face.flat(&face.drawn);
+                    if simple(&flat) && ears(&flat).is_some() {
+                        continue;
+                    }
+                    folded += 1;
+                    assert!(
+                        steep.face_may_fold(hull, face.n, &face.corners),
+                        "chunk {c}: a face folds past the gate"
+                    );
+                }
+            }
+        }
+        assert!(folded > 0, "the steep relief folds a face");
     }
 
-    /// A RELIEF THAT FOLDS A BREAK IS FOUND AT LOAD: the shipped house under its relief past the
-    /// fold bound tenfold (as no parsed file can be) has a chunk whose open face folds, and under
-    /// its shipped relief none ([`refuse_folds`], which names that chunk). The draw's never-fold
-    /// panic relies on the load gate holding every open face. A sweep that skips a face, or reads
-    /// the shipped relief whatever it is handed, fails here.
+    /// A RELIEF THAT COULD FOLD A FACE IS REFUSED AT LOAD: the shipped house at a tenth of its
+    /// size (fixture), its cells a few centimetres across, near the shipped relief's amplitude, is
+    /// refused by the loader ([`ConstructionKind::resolve`]) naming a chunk and the relief's
+    /// amplitude. The draw's never-fold panic relies on the loader sweeping every relieved chunk
+    /// ([`refuse_folds`]); a loader that skips the sweep fails here.
     #[test]
-    fn a_relief_that_folds_a_break_is_found_at_load() {
-        let kind = shipped_house();
-        let e = (0..kind.layout.element_blocks.len())
-            .find(|&e| ElementLook::of(&kind.asset, e).relief.is_some())
-            .expect("the shipped house draws relief");
-        let (_, mut steep) = (parse(SHIPPED)
-            .expect("the shipped reliefs")
-            .into_iter()
-            .next())
-        .expect("a shipped relief");
-        assert_eq!(steep.first_fold(&kind, e), None);
-        steep.amplitude_m.0 = 10.0 * MAX_WARP_SLOPE * steep.wavelength_m.0;
-        assert!(steep.first_fold(&kind, e).is_some());
+    fn a_relief_that_could_fold_a_face_is_refused_at_load() {
+        let house = shipped_house().asset.clone();
+        let err = crate::construction::tests::scaled(house, 0.1)
+            .map(drop)
+            .expect_err("the tenth-scale house's faces could fold under the shipped relief");
+        assert!(
+            err.contains("chunk")
+                && err.contains("could fold")
+                && err.contains("brick.amplitude_m"),
+            "{err}"
+        );
     }
 }
