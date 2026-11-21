@@ -15,8 +15,8 @@
 //!   than `amplitude_m`. An edge a break reaches is cut every `edge_pitch_m` from its lexically
 //!   first end, so each face drawing it draws the same points.
 //! - **Triangles.** A face with a moved point ear-clips its drawn outline seen along its normal,
-//!   which the load gate proves no break folds ([`refuse_folds`]). An open face takes smooth
-//!   normals; another keeps its plane's.
+//!   which the load gate proves no break folds ([`refuse_folds`]). An open face takes the
+//!   field's normals ([`Relief::normal`]); another keeps its plane's.
 //! - **Optics.** A cut face is core: its substance's exposed colour, with its visual's [`Units`]
 //!   drawn where the construction's joint planes cross it (`construction_surface.wesl` owns the
 //!   vertex contract), read at its asset-frame position so they move with a fallen piece.
@@ -154,20 +154,16 @@ fn noise(p: Vec3, channel: u32) -> f32 {
         + hash(origin + IVec3::ONE, channel) * lo
 }
 
-/// Resolution: a turn this small (twice a triangle's area, m²) is a straight run, not a corner; far
-/// below a millimetre-wide sliver of a centimetre edge.
-const STRAIGHT_M2: f32 = 1e-9;
-
-/// Resolution: a vertex this close (m) to an ear counts as on it, so a straight run whose f32
-/// coordinates wander by an ulp (about 1e-7 m at a metre, DERIVED) still blocks an ear across it.
-/// Distance to the triangle, never to its edges' lines: a thin ear's reach past its tip would
-/// block every ear of a sliver.
-const ON_EAR_M: f32 = 1e-6;
-
 /// Resolution: the grid (points per metre, 2²⁴) the clipper reads an outline on, so its turns are
 /// integers: exact, and the same on every platform. A point snaps at most 4.2e-8 m (half a cell's
 /// diagonal, DERIVED), under an f32's ulp at a metre.
 const GRID_PER_M: f64 = 16_777_216.0;
+
+/// Resolution: an open face's normal reads the field's slope between points this share of
+/// `wavelength_m` either side of a vertex. The noise is flat within each cell of a lattice one
+/// wavelength wide and its slope jumps at a cell's edge; a quarter-wavelength read blends the
+/// cells a vertex borders, and a wider one would flatten the relief it shades.
+const SLOPE_STEP: f32 = 0.125;
 
 /// A corner's identity: the bits of its baked coordinates.
 fn key(p: Vec3) -> [u32; 3] {
@@ -298,6 +294,30 @@ impl Relief {
         }
     }
 
+    /// The field's unit normal at `p` on an open face of outward normal `n`, in the element
+    /// bounded by `hull`. Every point of an open face lies on a break, at full reach, so the face
+    /// is the surface [`Self::shift`] alone carries its plane to: `n`, less the slope across the
+    /// plane of the shift's height along `n` ([`SLOPE_STEP`]). Its part along `n` is one before
+    /// it is scaled, so no outline, however thin its triangles, leaves a vertex without a normal.
+    fn normal(&self, p: Vec3, n: Vec3, hull: &[(Vec3, f32)]) -> Vec3 {
+        let step = self.wavelength_m.0 * SLOPE_STEP;
+        let (t, b) = n.any_orthonormal_pair();
+        let slope = |along: Vec3| {
+            let rise = self.shift(p + along * step, hull) - self.shift(p - along * step, hull);
+            along * (rise.dot(n) / (2.0 * step))
+        };
+        (n - slope(t) - slope(b)).normalize()
+    }
+
+    /// How far (m) f32 rounding can part a point and an edge of a face of law `corners` as the
+    /// draw computes its outline from where the gate's reasoning has them ([`ROUNDING_ULPS`]).
+    fn rounding(&self, corners: &[Vec3]) -> f64 {
+        let steepness = 1.0 + f64::from(self.amplitude_m.0 / self.wavelength_m.0);
+        let extent = (corners.iter().map(|p| p.abs().max_element())).fold(0.0, f32::max)
+            + self.amplitude_m.0;
+        ROUNDING_ULPS * f64::from(f32::EPSILON * extent) * steepness
+    }
+
     /// Edge `a`–`b`'s points from `a` as a reached edge draws them, its far end left to the next
     /// edge: `a`, then a point every `edge_pitch_m` (module doc).
     fn samples(&self, a: Vec3, b: Vec3) -> Vec<Vec3> {
@@ -337,15 +357,17 @@ impl Relief {
             .zip(&kind.dressing.across[c])
             .enumerate()
             .map(|(k, ((n, corners), across))| {
-                let drawn = edges(&corners)
+                let law: Vec<Vec3> = edges(&corners)
                     .flat_map(|(a, b)| self.points(a, b, &near))
-                    .map(|p| self.drawn(p, hull, &near))
                     .collect();
+                let open = breaks.open.contains(&(c, k));
+                let normal = |&p: &Vec3| if open { self.normal(p, n, hull) } else { n };
                 Outline {
                     n,
-                    open: breaks.open.contains(&(c, k)),
                     cut: across.is_some(),
-                    drawn,
+                    normals: law.iter().map(normal).collect(),
+                    drawn: law.iter().map(|&p| self.drawn(p, hull, &near)).collect(),
+                    wander_m: self.rounding(&corners),
                     corners,
                 }
             })
@@ -380,14 +402,11 @@ impl Relief {
     /// element bounded by `hull` ([`folds`]): its edges sampled as a reached edge is, each point
     /// moved by its shift times its reach, which changes by at most `1 / wavelength_m` per metre
     /// ([`reach`]). Any break draws the face as that outline at the reach the break gives, less the
-    /// points no break reaches, which lie on its law edges. The draw computes that outline in f32,
-    /// so the margin grows by what its rounding can part a point and an edge ([`ROUNDING_ULPS`]).
+    /// points no break reaches, which lie on its law edges. The margin is [`FOLD_MARGIN_M`] and
+    /// twice [`Self::rounding`]: once for the draw computing that outline in f32, once for the
+    /// clipper straightening each run of it by as much ([`ears`]).
     fn face_may_fold(&self, hull: &[(Vec3, f32)], n: Vec3, corners: &[Vec3]) -> bool {
         let slope = 1.0 / f64::from(self.wavelength_m.0);
-        let steepness = 1.0 + f64::from(self.amplitude_m.0) * slope;
-        let extent = (corners.iter().map(|p| p.abs().max_element())).fold(0.0, f32::max)
-            + self.amplitude_m.0;
-        let rounding = ROUNDING_ULPS * f64::from(f32::EPSILON * extent) * steepness;
         let t = (corners[1] - corners[0]).normalize();
         let b = n.cross(t);
         let flat = |v: Vec3| DVec2::new(f64::from(v.dot(t)), f64::from(v.dot(b)));
@@ -398,7 +417,12 @@ impl Relief {
         let shift: Vec<DVec2> = (points.iter())
             .map(|&p| flat(self.shift(p, hull)))
             .collect();
-        folds(&law, &shift, slope, FOLD_MARGIN_M + rounding)
+        folds(
+            &law,
+            &shift,
+            slope,
+            FOLD_MARGIN_M + 2.0 * self.rounding(corners),
+        )
     }
 
     /// Chunk `c` of element `look`'s faces, drawn `offset` back and tagged `tag`, beside `breaks`
@@ -419,32 +443,14 @@ impl Relief {
                 faces.face(face.n, &face.corners, look, offset, (tag, tint));
                 continue;
             }
-            let triangles = face.triangles();
-            let mut normals = vec![if face.open { Vec3::ZERO } else { face.n }; face.drawn.len()];
-            if face.open {
-                for &[i, j, k] in &triangles {
-                    let [a, b, c] = [i, j, k].map(|v| face.drawn[v]);
-                    for v in [i, j, k] {
-                        normals[v] += (b - a).cross(c - a);
-                    }
-                }
-            }
             let skin = if face.cut {
                 Skin::Core
             } else {
                 Skin::Hull(tint)
             };
-            let vertices: Vec<(Vec3, Vec3)> = (face.drawn.iter().zip(normals))
-                .map(|(&p, normal)| {
-                    let normal = normal.try_normalize();
-                    (
-                        p,
-                        normal.expect(
-                            "every outline vertex is a corner of a triangle of positive area",
-                        ),
-                    )
-                })
-                .collect();
+            let vertices: Vec<(Vec3, Vec3)> =
+                (face.drawn.iter().copied().zip(face.normals.iter().copied())).collect();
+            let triangles = face.triangles();
             faces.polygon(face.n, &vertices, &triangles, look, offset, (tag, skin));
         }
     }
@@ -493,16 +499,19 @@ struct Outline {
     corners: Vec<Vec3>,
     /// Its corners with the points its reached edges add, in order, as drawn.
     drawn: Vec<Vec3>,
+    /// Each drawn point's unit normal: the field's where a chunk across the face is not drawn
+    /// with its own ([`Relief::normal`]), else `n`.
+    normals: Vec<Vec3>,
     /// Whether it lies on none of its element's hull planes.
     cut: bool,
-    /// Whether a chunk across it is not drawn with its own.
-    open: bool,
+    /// How far (m) rounding moves a drawn point off a straight run ([`Relief::rounding`]).
+    wander_m: f64,
 }
 
 impl Outline {
-    /// Its triangles over `drawn`, each facing out.
+    /// Its triangles over `drawn` ([`ears`]).
     fn triangles(&self) -> Vec<[usize; 3]> {
-        ears(&self.flat(&self.drawn)).expect(
+        ears(&self.flat(&self.drawn), self.wander_m).expect(
             "a drawn outline is simple and counter-clockwise: the load gate's refuse_folds \
              keeps each point of a relieved face clear of the edges it does not end at every reach",
         )
@@ -570,10 +579,11 @@ pub(super) fn across(layout: &Layout) -> Result<Vec<Vec<Option<Vec<u16>>>>, Stri
     Ok(across)
 }
 
-/// Resolution: a drawn outline keeps each point this far (m) from every edge it does not end, at
-/// every reach. The clipper is owed more than twice its grid's snap (8.4e-8 m, [`GRID_PER_M`]),
-/// which keeps the outline it reads simple; a hundred times [`ON_EAR_M`] also keeps a vertex it
-/// reads as on an ear a vertex of a straight run, never another part of the outline (DERIVED).
+/// Resolution: the outline the clipper clips keeps each point this far (m) from every edge it
+/// does not end, at every reach. The clipper is owed more than twice its grid's snap (8.4e-8 m,
+/// [`GRID_PER_M`], DERIVED), which keeps the outline it reads simple; a tenth of a millimetre is
+/// a thousand times that and under anything a break shows, so the gate holds no face a player
+/// could tell from one it passes.
 const FOLD_MARGIN_M: f64 = 1e-4;
 
 /// Resolution: the most f32 rounding parts a point and an edge of the outline the draw computes
@@ -582,7 +592,7 @@ const FOLD_MARGIN_M: f64 = 1e-4;
 /// shift rounds each component half an ulp (0.9 together); seeing it along the normal rounds
 /// each of two coordinates under 2.6 (three products, two sums; 3.7 together), in the draw and
 /// in the gate; and its reach, off by under four ulps over `wavelength_m`, carries a shift of at
-/// most `amplitude_m`. That is under 8.3 a point and 16.6 a pair, held here with twice the room.
+/// most `amplitude_m`. That is under 8.3 a point and 16.6 a pair; 32 is 1.9 times that.
 const ROUNDING_ULPS: f64 = 32.0;
 
 /// Whether some reach could fold the outline `law`, seen along its normal and counter-clockwise,
@@ -671,67 +681,106 @@ fn turn([ax, ay]: [i128; 2], [bx, by]: [i128; 2], [cx, cy]: [i128; 2]) -> i128 {
     (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
 }
 
-/// Ear clipping of the polygon `points`, counter-clockwise, read on [`GRID_PER_M`]: `None` only
-/// where the polygon read there is not simple. A simple one always has an ear, a corner turning
-/// left whose closed triangle holds no other vertex (the two-ears theorem), and integer turns
-/// find it; clipping it leaves a simple polygon. Of the ears it takes a sound one before any
-/// other (wider than [`STRAIGHT_M2`], no vertex within [`ON_EAR_M`]), then the fattest: while a
-/// sound ear is left a vertex on a straight run is no ear's tip and blocks an ear across the run,
-/// so the run's vertices join triangles of real area: a run straight on this plane may still bend
-/// off it.
-fn ears(points: &[Vec2]) -> Option<Vec<[usize; 3]>> {
+/// Triangles over the polygon `points`, counter-clockwise, read on [`GRID_PER_M`]: `None` only
+/// where the polygon read there is not simple once its runs are straightened.
+/// - **Runs.** A vertex is on a run where it, and each vertex already taken out beside it, lies
+///   within `wander_m` of the chord joining the corners either side: a straight stretch as
+///   rounding left it. The corners that remain are the polygon it clips, each run its chord.
+/// - **Ears.** A simple polygon always has an ear, a corner turning left whose closed triangle
+///   holds no other corner (the two-ears theorem); integer turns find it, and clipping it leaves
+///   a simple polygon. It takes the fattest each time.
+/// - **Fans.** A run's vertices fan from the far corner of the triangle that took their chord,
+///   so no triangle has all its corners on one run, and the run's vertices follow the outline
+///   where a run straight on this plane bends off it.
+fn ears(points: &[Vec2], wander_m: f64) -> Option<Vec<[usize; 3]>> {
     let n = points.len();
+    let grid = snapped(points);
+    let turn = |a: usize, b: usize, c: usize| turn(grid[a], grid[b], grid[c]);
     let mut next: Vec<usize> = (0..n).map(|i| (i + 1) % n).collect();
     let mut prev: Vec<usize> = (0..n).map(|i| (i + n - 1) % n).collect();
     let mut alive = vec![true; n];
-    let grid = snapped(points);
-    let turn = |a: usize, b: usize, c: usize| turn(grid[a], grid[b], grid[c]);
-    // An ear's soundness, then its fatness: its area over its summed squared sides, largest for an
-    // equilateral one.
-    let ear = |i: usize, prev: &[usize], next: &[usize], alive: &[bool]| -> Option<(bool, f32)> {
+    let mut corners = n;
+    // Integer to f64, product, root and compare: one verdict on every platform.
+    let on_chord = |v: usize, a: usize, c: usize| {
+        let [dx, dy] = [grid[c][0] - grid[a][0], grid[c][1] - grid[a][1]];
+        turn(a, c, v).unsigned_abs() as f64
+            <= wander_m * GRID_PER_M * ((dx * dx + dy * dy) as f64).sqrt()
+    };
+    while corners > 3
+        && let Some(i) = (0..n).find(|&i| {
+            let (a, c) = (prev[i], next[i]);
+            alive[i]
+                && (1..n)
+                    .map(|k| (a + k) % n)
+                    .take_while(|&v| v != c)
+                    .all(|v| on_chord(v, a, c))
+        })
+    {
+        alive[i] = false;
+        next[prev[i]] = next[i];
+        prev[next[i]] = prev[i];
+        corners -= 1;
+    }
+    let (corner, chord_end) = (alive.clone(), next.clone());
+    // An ear's fatness: its area over its summed squared sides, largest for an equilateral one.
+    let ear = |i: usize, prev: &[usize], next: &[usize], alive: &[bool]| -> Option<f64> {
         let (a, c) = (prev[i], next[i]);
-        let others = || (0..n).filter(|&v| alive[v] && ![a, i, c].contains(&v));
         let sides = [(a, i), (i, c), (c, a)];
-        if turn(a, i, c) <= 0 || others().any(|v| sides.iter().all(|&(p, q)| turn(p, q, v) >= 0)) {
+        let inside = |v: usize| sides.iter().all(|&(p, q)| turn(p, q, v) >= 0);
+        if turn(a, i, c) <= 0 || (0..n).any(|v| alive[v] && ![a, i, c].contains(&v) && inside(v)) {
             return None;
         }
-        let off_edge = |p: usize, q: usize, v: usize| {
-            let edge = points[q] - points[p];
-            let t = ((points[v] - points[p]).dot(edge) / edge.length_squared()).clamp(0.0, 1.0);
-            points[v].distance(points[p] + edge * t)
-        };
-        let area = (points[i] - points[a]).perp_dot(points[c] - points[a]);
-        let sound = area > STRAIGHT_M2
-            && !others().any(|v| sides.iter().any(|&(p, q)| off_edge(p, q, v) <= ON_EAR_M));
-        let spread = points[a].distance_squared(points[i])
-            + points[i].distance_squared(points[c])
-            + points[c].distance_squared(points[a]);
-        Some((sound, area / spread))
+        let spread: i128 = (sides.iter())
+            .map(|&(p, q)| {
+                (0..2)
+                    .map(|k| (grid[q][k] - grid[p][k]).pow(2))
+                    .sum::<i128>()
+            })
+            .sum();
+        Some(turn(a, i, c) as f64 / spread as f64)
     };
-    let mut score: Vec<Option<(bool, f32)>> =
-        (0..n).map(|i| ear(i, &prev, &next, &alive)).collect();
+    let mut score: Vec<Option<f64>> = (0..n)
+        .map(|i| alive[i].then(|| ear(i, &prev, &next, &alive)).flatten())
+        .collect();
     let mut triangles = Vec::with_capacity(n.saturating_sub(2));
-    for _ in 3..n {
+    for _ in 3..corners {
         let (i, _) = (0..n)
             .filter(|&i| alive[i])
             .filter_map(|i| score[i].map(|s| (i, s)))
-            .max_by(|(_, a), (_, b)| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))?;
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))?;
         let (a, c) = (prev[i], next[i]);
         triangles.push([a, i, c]);
         alive[i] = false;
         next[a] = c;
         prev[c] = a;
-        // A sound ear stays one as vertices leave; any other may gain or lose what blocked it.
-        for j in (0..n).filter(|&j| alive[j]) {
-            if j == a || j == c || !matches!(score[j], Some((true, _))) {
-                score[j] = ear(j, &prev, &next, &alive);
-            }
-        }
+        // Only the clip's neighbours change: a corner that is no ear stays none until one of its
+        // own neighbours leaves, for the last corner inside its triangle is reflex, never a tip.
+        score[a] = ear(a, &prev, &next, &alive);
+        score[c] = ear(c, &prev, &next, &alive);
     }
-    let last = (0..n).find(|&i| alive[i]).expect("three vertices remain");
+    let last = (0..n).find(|&i| alive[i])?;
     let [a, i, c] = [prev[last], last, next[last]];
+    if corners < 3 || turn(a, i, c) <= 0 {
+        return None;
+    }
     triangles.push([a, i, c]);
-    (turn(a, i, c) > 0).then_some(triangles)
+    for a in (0..n).filter(|&a| corner[a] && chord_end[a] != (a + 1) % n) {
+        let c = chord_end[a];
+        let (at, apex) = (triangles.iter().enumerate())
+            .find_map(|(at, tri)| {
+                (0..3)
+                    .find(|&k| [tri[k], tri[(k + 1) % 3]] == [a, c])
+                    .map(|k| (at, tri[(k + 2) % 3]))
+            })
+            .expect("each side of the clipped polygon is one triangle's");
+        triangles.swap_remove(at);
+        let run = (0..n)
+            .map(|k| (a + k) % n)
+            .take_while(|&v| v != c)
+            .chain([c]);
+        triangles.extend(run.clone().zip(run.skip(1)).map(|(p, q)| [p, q, apex]));
+    }
+    Some(triangles)
 }
 
 #[cfg(test)]
@@ -755,6 +804,14 @@ mod tests {
             .map(|&o| usize::from(o))
     }
 
+    /// Which of chunk `c`'s faces lies toward `other`, in [`Block::faces`] order.
+    fn facing(kind: &ConstructionKind, c: usize, other: usize) -> usize {
+        kind.dressing.across[c]
+            .iter()
+            .position(|across| across.iter().flatten().any(|&o| usize::from(o) == other))
+            .expect("a neighbour lies across one face")
+    }
+
     /// Chunk `c`'s face toward `other`, among its drawn `faces`.
     fn toward<'a>(
         kind: &ConstructionKind,
@@ -762,11 +819,7 @@ mod tests {
         c: usize,
         other: usize,
     ) -> &'a Outline {
-        let k = kind.dressing.across[c]
-            .iter()
-            .position(|across| across.iter().flatten().any(|&o| usize::from(o) == other))
-            .expect("a neighbour lies across one face");
-        &faces[k]
+        &faces[facing(kind, c, other)]
     }
 
     /// Whether two faces draw the same points: two chunks' baked copies of one corner may differ
@@ -802,9 +855,10 @@ mod tests {
 
     /// Chunk `c` drawn beside `breaks` into a mesh of its own, tagged `tag`: each face draws its
     /// outline as drawn, clear of folding ([`unfolded`]), in `n − 2` triangles for `n` points,
-    /// each facing out of its face and using each outline edge once, as the outline runs; every
+    /// each facing out of its face (or a sliver of a run, thinner than twice its rounding) and
+    /// using each outline edge once, as the outline runs; every
     /// outline edge is drawn back by another face, so the surface closes; every vertex carries
-    /// `tag`.
+    /// `tag` and a unit normal leaning out of its face.
     fn assert_drawn(kind: &ConstructionKind, relief: &Relief, c: usize, breaks: &Breaks) {
         let look = ElementLook::of(&kind.asset, usize::from(kind.layout.element_of[c]));
         let tag = (c + 1) as f32;
@@ -822,9 +876,10 @@ mod tests {
             let mut used: HashMap<(u32, u32), usize> = HashMap::new();
             for triangle in triangles.by_ref().take(n - 2) {
                 let [a, b, d] = [0, 1, 2].map(|k| at(triangle[k]));
-                let normal = (b - a).cross(d - a);
+                let [a, b, d] = [a, b, d].map(|p| face.flat(&[p])[0].as_dvec2());
+                let longest = a.distance(b).max(b.distance(d)).max(d.distance(a));
                 assert!(
-                    normal.dot(face.n) > 0.0,
+                    (b - a).perp_dot(d - a) > -2.0 * face.wander_m * longest,
                     "chunk {c}: a triangle turned away"
                 );
                 for k in 0..3 {
@@ -839,6 +894,11 @@ mod tests {
                     at(p),
                     face.drawn[i],
                     "chunk {c}: the mesh draws the outline"
+                );
+                let normal = Vec3::from_array(faces.normals[p as usize]);
+                assert!(
+                    normal.is_normalized() && normal.dot(face.n) > 0.0,
+                    "chunk {c}: a normal that does not lean out of its face"
                 );
                 assert!(
                     used.get(&(p, q)) == Some(&1) && !used.contains_key(&(q, p)),
@@ -898,7 +958,7 @@ mod tests {
                     toward(&kind, &piece, gone, *c),
                 );
                 assert!(
-                    face.open && alike(face, back),
+                    rim.open.contains(&(*c, facing(&kind, *c, gone))) && alike(face, back),
                     "chunk {c} and its piece {gone}"
                 );
                 for (d, other) in near
@@ -1008,21 +1068,35 @@ mod tests {
         assert!(folds(&slab, &across, 1.0));
     }
 
-    /// THE CLIPPER CLIPS EVERY SIMPLE OUTLINE, ONE WITH NO SOUND EAR INCLUDED: a square (fixture)
-    /// thirty-two cells of the clipper's grid wide, every ear of it narrower than
-    /// [`STRAIGHT_M2`], clips into two triangles that turn left; a bow-tie does not clip. The
-    /// draw's never-fold panic relies on it: the load gate proves a drawn outline simple, never
-    /// that it holds a sound ear. A clipper that takes sound ears alone fails here.
+    /// A RUN FANS FROM THE CORNER ACROSS IT, HOWEVER FAR OUT IT LIES: a triangle (fixture) 16 m
+    /// and 40 m from the origin, one side holding a vertex two f32 steps outside it, as rounding
+    /// leaves a straight run there, draws the two triangles that meet at the far corner; neither
+    /// joins the run's three vertices. The view relies on it for a break face that follows its
+    /// edge at any size of construction: the run is read at the wander its relief's rounding
+    /// states there ([`Relief::rounding`]). A run read at one tolerance whatever the coordinates'
+    /// size fails it.
     #[test]
-    fn the_clipper_clips_every_simple_outline() {
-        let side = (32.0 / GRID_PER_M) as f32;
-        let square = [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y].map(|p| Vec2::ONE + p * side);
-        let triangles = ears(&square).expect("a simple outline clips");
-        assert_eq!(triangles.len(), 2);
-        for [a, b, c] in triangles {
-            assert!((square[b] - square[a]).perp_dot(square[c] - square[a]) > 0.0);
+    fn a_run_fans_from_the_corner_across_it_however_far_out() {
+        let relief = Relief {
+            amplitude_m: Sourced(0.02),
+            wavelength_m: Sourced(0.1),
+            edge_pitch_m: Sourced(0.04),
+            units: None,
+        };
+        for far in [16.0_f32, 40.0] {
+            let outside = far.next_down().next_down();
+            let outline = [
+                Vec2::new(far, far),
+                Vec2::new(far + 0.25, outside),
+                Vec2::new(far + 0.5, far),
+                Vec2::new(far + 0.25, far + 0.4),
+            ];
+            let wander = relief.rounding(&outline.map(|p| p.extend(0.0)));
+            let mut triangles = ears(&outline, wander).expect("a simple outline clips");
+            triangles.iter_mut().for_each(|corners| corners.sort());
+            triangles.sort();
+            assert_eq!(triangles, [[0, 1, 3], [1, 2, 3]], "{far} m out");
         }
-        assert_eq!(ears(&[Vec2::ZERO, Vec2::ONE, Vec2::X, Vec2::Y]), None);
     }
 
     /// NO BREAK BRINGS A FACE THE LOAD GATE PASSES NEAR FOLDING: under a fixture relief stated in
@@ -1075,7 +1149,7 @@ mod tests {
                     }
                     moved += usize::from(face.drawn != face.corners);
                     assert!(
-                        unfolded(&flat) && ears(&flat).is_some(),
+                        unfolded(&flat) && ears(&flat, face.wander_m).is_some(),
                         "chunk {c}: a face the gate passes is drawn within the margin of folding"
                     );
                 }
