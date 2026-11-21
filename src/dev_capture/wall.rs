@@ -212,7 +212,7 @@ pub(crate) fn server_wall_plugin(app: &mut App) {
 }
 
 pub(super) fn install_server(app: &mut App, cue: Cue) {
-    super::clock::install(app, super::Anchor::Startup);
+    super::clock::install(app, &super::Anchor::Startup);
     app.insert_resource(cue)
         .add_systems(PostStartup, check_wall_target)
         .add_systems(Update, fire_on_cue.in_set(super::clock::Cues));

@@ -346,6 +346,11 @@ pub(crate) mod tests {
     /// Fixture: a column of three unit cubes, joined over their full faces, anchored at its base.
     /// It has no house topology or view asset; all masses derive from the registry's material density.
     pub(crate) fn column_construction() -> Arc<ConstructionKind> {
+        column_construction_from(0.0)
+    }
+
+    /// [`column_construction`] with its base at height `base` in its frame, m.
+    pub(crate) fn column_construction_from(base: f32) -> Arc<ConstructionKind> {
         let registry = crate::substances::SubstanceRegistry::shipped_static();
         let density = fracture::Material::of(registry, "Brick")
             .unwrap()
@@ -364,7 +369,7 @@ pub(crate) mod tests {
         let asset = ConstructionAsset {
             id: "column_fixture".into(),
             format: schema::FORMAT,
-            foundation_y_m: 0.0,
+            foundation_y_m: base,
             materials: vec!["Brick".into()],
             attachments: vec!["mortared".into()],
             components: vec!["column".into()],
@@ -374,17 +379,17 @@ pub(crate) mod tests {
                 component: 0,
                 material: 0,
                 surface_frame: schema::SurfaceFrame::Upright,
-                hull: hull(0.0, 3.0),
+                hull: hull(base, base + 3.0),
                 chunks: [0, 3],
             }],
             chunks: (0..3)
                 .map(|c| schema::Chunk {
                     element: 0,
                     material: 0,
-                    hull: hull(c as f32, c as f32 + 1.0),
+                    hull: hull(base + c as f32, base + c as f32 + 1.0),
                     volume_m3: 1.0,
                     mass_kg: density,
-                    centroid: [0.0, c as f32 + 0.5, 0.0],
+                    centroid: [0.0, base + c as f32 + 0.5, 0.0],
                 })
                 .collect(),
             joints: (0..2)
@@ -392,7 +397,7 @@ pub(crate) mod tests {
                     a,
                     b: a + 1,
                     area_m2: 1.0,
-                    centroid: [0.0, a as f32 + 1.0, 0.0],
+                    centroid: [0.0, base + a as f32 + 1.0, 0.0],
                     normal: [0.0, 1.0, 0.0],
                     bond: schema::Bond::Seam,
                 })
@@ -401,7 +406,7 @@ pub(crate) mod tests {
                 chunk: 0,
                 attachment: 0,
                 area_m2: 1.0,
-                centroid: [0.0; 3],
+                centroid: [0.0, base, 0.0],
             }],
         };
         Arc::new(

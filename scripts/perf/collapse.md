@@ -47,3 +47,22 @@ On Linux, `linux_host.host_probe_us` exposes the periodic `/proc` walk outside `
 Lifecycle observations between fixed ticks are reported as `piece_census.lifecycle_outside_tick_us`,
 separate from additive tick leaves. `awake_ticks` remains a piece's cumulative awake duration;
 completed episodes retain their own immutable snapshots.
+
+Each ram row's `hull` is the tank after that tick's physics step, and what moved it along its own
+forward over the step (`src/net/ram.rs`, `HullRow`): solver momentum by the other body's kind and
+the sweep's exchange, N s, and the sweep's verdicts on the cuts the hull met. The belts' implicit
+support and traction and gravity are not channels, so the channels do not sum to m·Δv.
+`impact.speed_m_s` is the horizontal speed of the row before first contact. `result.json` adds
+`min_forward_m_s`, `largest_forward_change_m_s`, `crossing_s` and `stall_s`, from the contact tick
+on, each defined in its `definitions`. The server's last line adds `structure`, the struck
+construction at the capture's end (`src/net/ram/structure.rs`): the share of its volume built above
+grade still in place (every corner within the recipe's `in_place_m`, a labelled `Unit`), the
+volume-weighted displacement of what still stands on a body, the opening in `plan.panel` (the
+component the approaching tank meets first, chosen before play), and the largest loose piece.
+
+`--clip PLAN`, local `--ram` only, is `scripts/debris-lab`'s: the driving client renders the
+capture plan's frames on a hidden window, in the run's folder (the plan's relative paths land
+there) and with its own settings folder. Its frames open on the tank's approach to the recipe's
+construction (`dev_capture`, `Anchor::Approach`), and the run completes only once the client logs
+`capture: N of N frames saved`. Its tick times compare only with another clip run of the same plan
+on the same machine.

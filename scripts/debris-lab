@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The building-debris model's lab (game state only): a ram pass filmed from the driving client,
+# and two passes compared. scripts/debris-lab run scripts/perf/ram.json target/lab/a, then
+# scripts/debris-lab compare target/lab/a target/lab/b target/lab/a-b. See scripts/perf/debris_lab.py.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec python3 scripts/perf/debris_lab.py "$@"

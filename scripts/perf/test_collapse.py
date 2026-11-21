@@ -451,9 +451,15 @@ class RamTests(unittest.TestCase):
         # Fixture: unequal sends expose percentile-of-percentile bugs.
         recipe = collapse.ram_recipe(collapse.ROOT / "scripts/perf/ram.json")
         ticks = [tick_fixture(i, 1) for i in range(1, 5)]
-        ram = dict(recipe=recipe, plan=dict(minimum_m_s=9, governed_m_s=10, runup_m=20,
+        # Fixture hull: at rest on the approach row, then slowed, stopped and driven on.
+        for tick, forward, along in zip(ticks, [0, 6, -1, 2], [0, 5, 6, 12]):
+            previous = None if tick["tick"] == 1 else ticks[tick["tick"] - 2]["hull"]["forward_m_s"]
+            tick["hull"] = dict(forward_m_s=forward, along_m=along,
+                                forward_change_m_s=None if previous is None else forward - previous)
+        ram = dict(recipe=recipe, plan=dict(minimum_m_s=9, governed_m_s=10, runup_m=20, clear_m=10,
                                            spawn=[0, 0, 0], rotation=[0, 0, 0, 1]),
                    impact=dict(tick=2, speed_m_s=10, normal_speed_m_s=10), done="deadline", ticks=ticks,
+                   structure=dict(above_grade_m3=2, in_place_m3=1, in_place_share=0.5, carried_m3=1.5, displacement_m=0.4, opening_m2=1),
                    sends=[dict(tick=1, us=1000), dict(tick=3, us=40)], pieces=EMPTY_PIECES)
         return recipe, ram
 
@@ -560,6 +566,17 @@ class RamTests(unittest.TestCase):
         self.assertAlmostEqual(result["share_pct"]["crumble"], 100*21/900)
         self.assertEqual(result["stage_us"]["unattributed"], 609)
 
+    def test_crossing_and_stall_count_from_the_contact_tick(self):
+        # The ram investigation compares passes by these; an approach tick at rest is no stall and
+        # the run-up is no crossing time.
+        recipe, ram = self.fixture()
+        result = collapse.ram_summary(self.text(ram), recipe)
+        self.assertAlmostEqual(result["crossing_s"], 0.2)
+        self.assertAlmostEqual(result["stall_s"], 0.1)
+        self.assertEqual((result["min_forward_m_s"], result["largest_forward_change_m_s"]), (-1, -7))
+        ram["plan"]["clear_m"] = 13  # Fixture: a far bound the hull never clears.
+        self.assertIsNone(collapse.ram_summary(self.text(ram), recipe)["crossing_s"])
+
     def test_each_over_budget_tick_reports_its_own_gap_including_the_approach(self):
         # Fixture: all ticks exceed the budget, including the tick before measured contact.
         recipe, ram = self.fixture()
@@ -617,7 +634,8 @@ class RamTests(unittest.TestCase):
 
     def test_ram_refuses_slow_impact_missing_ticks_and_incompatible_logs(self):
         recipe, ram = self.fixture()
-        for field, value in [("impact", dict(tick=2, speed_m_s=8, normal_speed_m_s=8)), ("done", "unknown")]:
+        for field, value in [("impact", dict(tick=2, speed_m_s=8, normal_speed_m_s=8)), ("done", "unknown"),
+                             ("impact", dict(tick=2, speed_m_s=None, normal_speed_m_s=10)), ("structure", None)]:
             changed = dict(ram, **{field: value})
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 collapse.ram_summary(self.text(changed), recipe)
@@ -662,7 +680,7 @@ class RamTests(unittest.TestCase):
     def test_ram_refuses_nonfinite_numbers_before_completion(self):
         # The runner must refuse invalid numbers in samples and metadata in an unfinished prefix.
         recipe, ram = self.fixture()
-        for section, fields in (("plan", ("minimum_m_s", "governed_m_s", "runup_m", "spawn", "rotation")),
+        for section, fields in (("plan", ("minimum_m_s", "governed_m_s", "runup_m", "clear_m", "spawn", "rotation")),
                                 ("impact", ("speed_m_s", "normal_speed_m_s")),
                                 ("ticks", ("tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s")),
                                 ("sends", ("us",))):

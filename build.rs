@@ -13,6 +13,9 @@
 //! A file in either directory that is not `<stem><suffix>` with a non-empty stem fails the build,
 //! naming the file: a stray file there is an authoring slip, never an ignored one. Dotfiles are
 //! skipped (a platform's folder metadata is not data).
+//!
+//! Sets `OVERMATCH_FEATURES`, the build's enabled cargo features by name, sorted and
+//! comma-separated, for the startup build line (`net::compatibility`).
 
 #[path = "src/ballistics/authored.rs"]
 mod authored;
@@ -34,6 +37,12 @@ fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets it"));
     println!("cargo:rerun-if-changed=build.rs");
+    // `vars_os`: a variable that is not Unicode, which no feature name is, cannot panic the build.
+    let mut features: Vec<String> = std::env::vars_os()
+        .filter_map(|(key, _)| Some(key.to_str()?.strip_prefix("CARGO_FEATURE_")?.to_lowercase()))
+        .collect();
+    features.sort();
+    println!("cargo:rustc-env=OVERMATCH_FEATURES={}", features.join(","));
     write_authored_data(&manifest, &out);
     let mut text = String::from("// Written by build.rs from assets/rounds/ and assets/guns/.\n");
     for (constant, directory, suffix) in INDEXES {
