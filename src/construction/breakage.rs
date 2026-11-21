@@ -42,13 +42,14 @@
 //!   another deposit.
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
 //!   about its chord, open across each face it crosses ([`open_ends`]), and a blast's scab a dish
-//!   in the chunk it leaves ([`holes_of`]); a blast's face takes the cells about it
-//!   ([`fracture::strike`]) and cuts none; a chunk still standing after the deposit
-//!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
-//!   or mass reads a hole: they see the whole chunk, and [`Shape`] holds none. A hole holds no more
-//!   than the volume its load crushed, the volume it took from the chunk's pool, so one the size
-//!   of its chunk is a spent pool, recorded as dust. Only the pool decides dust: a chunk holding
-//!   [`HOLES_PER_CHUNK`] holes keeps standing and draws no later one.
+//!   in the chunk it leaves ([`holes_of`]); a blast's face cuts none: its fractured zone empties
+//!   the pools of the cells nearest it in turn and may only wear the last ([`fracture::strike`]);
+//!   a chunk still standing after the deposit keeps its hole in a per-chunk list
+//!   ([`Live::holes`]), for the view to draw. No law, collider or mass reads a hole: they see the
+//!   whole chunk, and [`Shape`] holds none. A hole holds no more than the volume its load crushed,
+//!   the volume it took from the chunk's pool, so one the size of its chunk is a spent pool,
+//!   recorded as dust. Only the pool decides dust: a chunk holding [`HOLES_PER_CHUNK`] holes keeps
+//!   standing and draws no later one.
 //! * **The record** ([`Record`]): wear, dust, holes, cohesion cracks and contact separations, in authority order,
 //!   with its tick. The authority appends; the network carries it ([`crate::net`]'s ledger); a
 //!   replica rebuilds the same state from it ([`derive_from_record`]); the view presents it at the
@@ -2307,9 +2308,10 @@ enum Stop {
 /// line's channel runs along its chord, its radius the narrower of the cylinder about the chord
 /// and the ball that hold that volume (so a chord grazing a corner never cuts a disc wider than
 /// the ball); a scab's dish is a ball about the back point it leaves whose half holds it. A
-/// blast's face cuts none: the zone it takes is whole cells ([`fracture::strike`]). ASSUMED: a
-/// channel's section is a circle and its width the energy's alone, not the round's diameter; a
-/// dish's centre lies on the chunk's face, so half its ball is in the chunk.
+/// blast's face cuts none: its zone empties the pools of the cells nearest it in turn and may only
+/// wear the last, which is drawn whole ([`fracture::strike`]). ASSUMED: a channel's section is a
+/// circle and its width the energy's alone, not the round's diameter; a dish's centre lies on the
+/// chunk's face, so half its ball is in the chunk.
 fn holes_of(
     kind: &ConstructionKind,
     lines: &[(usize, Vec3, Vec3, f32)],
