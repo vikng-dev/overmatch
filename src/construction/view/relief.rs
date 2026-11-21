@@ -164,6 +164,11 @@ const STRAIGHT_M2: f32 = 1e-9;
 /// block every ear of a sliver.
 const ON_EAR_M: f32 = 1e-6;
 
+/// Resolution: the grid (points per metre, 2²⁴) the clipper reads an outline on, so its turns are
+/// integers: exact, and the same on every platform. A point snaps at most 4.2e-8 m (half a cell's
+/// diagonal, DERIVED), under an f32's ulp at a metre.
+const GRID_PER_M: f64 = 16_777_216.0;
+
 /// A corner's identity: the bits of its baked coordinates.
 fn key(p: Vec3) -> [u32; 3] {
     p.to_array().map(f32::to_bits)
@@ -375,9 +380,14 @@ impl Relief {
     /// element bounded by `hull` ([`folds`]): its edges sampled as a reached edge is, each point
     /// moved by its shift times its reach, which changes by at most `1 / wavelength_m` per metre
     /// ([`reach`]). Any break draws the face as that outline at the reach the break gives, less the
-    /// points no break reaches, which lie on its law edges.
+    /// points no break reaches, which lie on its law edges. The draw computes that outline in f32,
+    /// so the margin grows by what its rounding can part a point and an edge ([`ROUNDING_ULPS`]).
     fn face_may_fold(&self, hull: &[(Vec3, f32)], n: Vec3, corners: &[Vec3]) -> bool {
         let slope = 1.0 / f64::from(self.wavelength_m.0);
+        let steepness = 1.0 + f64::from(self.amplitude_m.0) * slope;
+        let extent = (corners.iter().map(|p| p.abs().max_element())).fold(0.0, f32::max)
+            + self.amplitude_m.0;
+        let rounding = ROUNDING_ULPS * f64::from(f32::EPSILON * extent) * steepness;
         let t = (corners[1] - corners[0]).normalize();
         let b = n.cross(t);
         let flat = |v: Vec3| DVec2::new(f64::from(v.dot(t)), f64::from(v.dot(b)));
@@ -388,7 +398,7 @@ impl Relief {
         let shift: Vec<DVec2> = (points.iter())
             .map(|&p| flat(self.shift(p, hull)))
             .collect();
-        folds(&law, &shift, slope)
+        folds(&law, &shift, slope, FOLD_MARGIN_M + rounding)
     }
 
     /// Chunk `c` of element `look`'s faces, drawn `offset` back and tagged `tag`, beside `breaks`
@@ -494,7 +504,7 @@ impl Outline {
     fn triangles(&self) -> Vec<[usize; 3]> {
         ears(&self.flat(&self.drawn)).expect(
             "a drawn outline is simple and counter-clockwise: the load gate's refuse_folds \
-             proved every relieved face so at every reach",
+             keeps each point of a relieved face clear of the edges it does not end at every reach",
         )
     }
 
@@ -561,17 +571,27 @@ pub(super) fn across(layout: &Layout) -> Result<Vec<Vec<Option<Vec<u16>>>>, Stri
 }
 
 /// Resolution: a drawn outline keeps each point this far (m) from every edge it does not end, at
-/// every reach: a hundred times [`ON_EAR_M`], so the clipper never reads two parts of it as
-/// touching.
+/// every reach. The clipper is owed more than twice its grid's snap (8.4e-8 m, [`GRID_PER_M`]),
+/// which keeps the outline it reads simple; a hundred times [`ON_EAR_M`] also keeps a vertex it
+/// reads as on an ear a vertex of a straight run, never another part of the outline (DERIVED).
 const FOLD_MARGIN_M: f64 = 1e-4;
+
+/// Resolution: the most f32 rounding parts a point and an edge of the outline the draw computes
+/// from the one [`folds`] reasons about, in ulps of the face's farthest coordinate (shift
+/// included) times one more than `amplitude_m / wavelength_m` (DERIVED). Per point: adding the
+/// shift rounds each component half an ulp (0.9 together); seeing it along the normal rounds
+/// each of two coordinates under 2.6 (three products, two sums; 3.7 together), in the draw and
+/// in the gate; and its reach, off by under four ulps over `wavelength_m`, carries a shift of at
+/// most `amplitude_m`. That is under 8.3 a point and 16.6 a pair, held here with twice the room.
+const ROUNDING_ULPS: f64 = 32.0;
 
 /// Whether some reach could fold the outline `law`, seen along its normal and counter-clockwise,
 /// each point moved by its `shift` times a reach in `[0, 1]` that changes by at most `slope` per
-/// metre: bring a point within [`FOLD_MARGIN_M`] of an edge it does not end. At no reach it is
-/// its law face, simple; a reach scaled down to none stays a reach, and an outline turns
-/// non-simple only through a point meeting such an edge, so one that no reach brings that close is
-/// simple and counter-clockwise at every reach (DERIVED).
-fn folds(law: &[DVec2], shift: &[DVec2], slope: f64) -> bool {
+/// metre: bring a point within `margin` (m) of an edge it does not end. At no reach it is its law
+/// face, simple; a reach scaled down to none stays a reach, and an outline turns non-simple only
+/// through a point meeting such an edge, so one that no reach brings that close is simple and
+/// counter-clockwise at every reach (DERIVED).
+fn folds(law: &[DVec2], shift: &[DVec2], slope: f64, margin: f64) -> bool {
     let n = law.len();
     (0..n).any(|i| {
         (0..n).filter(|&j| i != j && i != (j + 1) % n).any(|j| {
@@ -579,7 +599,7 @@ fn folds(law: &[DVec2], shift: &[DVec2], slope: f64) -> bool {
             let (p, a, b) = (law[i], law[j], law[k]);
             let t = ((p - a).dot(b - a) / a.distance_squared(b)).clamp(0.0, 1.0);
             let moved = shift[i].length() + shift[j].length().max(shift[k].length());
-            if p.distance(a.lerp(b, t)) > moved + FOLD_MARGIN_M {
+            if p.distance(a.lerp(b, t)) > moved + margin {
                 return false; // No point moves farther than its shift.
             }
             // Reach ρ at `p`, ρ + α at `a` and ρ + β at `b`.
@@ -609,7 +629,7 @@ fn folds(law: &[DVec2], shift: &[DVec2], slope: f64) -> bool {
                     (b - p).dot(a - b)
                 }),
             ];
-            clear.into_iter().fold(f64::NEG_INFINITY, f64::max) < FOLD_MARGIN_M * longest
+            clear.into_iter().fold(f64::NEG_INFINITY, f64::max) < margin * longest
         })
     })
 }
@@ -635,61 +655,83 @@ fn least((da, db): (f64, f64), f: impl Fn(f64, f64, f64) -> f64) -> f64 {
     least
 }
 
-/// Ear clipping of the polygon `points`, counter-clockwise, taking the fattest ear each time, or
-/// `None` where it folds and no ear is left. A vertex on a straight run is never an ear's tip, so
-/// every triangle has positive area, and blocks any ear across the run, so the run's vertices all
-/// join the triangles: a run straight on this plane may still bend off it.
+/// `points` on the clipper's grid ([`GRID_PER_M`]).
+fn snapped(points: &[Vec2]) -> Vec<[i128; 2]> {
+    (points.iter())
+        .map(|p| {
+            p.to_array()
+                .map(|v| (f64::from(v) * GRID_PER_M).round() as i128)
+        })
+        .collect()
+}
+
+/// Twice the area of the grid triangle `a`, `b`, `c`, positive where it turns left; exact while a
+/// coordinate stays under 2³⁸ m.
+fn turn([ax, ay]: [i128; 2], [bx, by]: [i128; 2], [cx, cy]: [i128; 2]) -> i128 {
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+/// Ear clipping of the polygon `points`, counter-clockwise, read on [`GRID_PER_M`]: `None` only
+/// where the polygon read there is not simple. A simple one always has an ear, a corner turning
+/// left whose closed triangle holds no other vertex (the two-ears theorem), and integer turns
+/// find it; clipping it leaves a simple polygon. Of the ears it takes a sound one before any
+/// other (wider than [`STRAIGHT_M2`], no vertex within [`ON_EAR_M`]), then the fattest: while a
+/// sound ear is left a vertex on a straight run is no ear's tip and blocks an ear across the run,
+/// so the run's vertices join triangles of real area: a run straight on this plane may still bend
+/// off it.
 fn ears(points: &[Vec2]) -> Option<Vec<[usize; 3]>> {
     let n = points.len();
     let mut next: Vec<usize> = (0..n).map(|i| (i + 1) % n).collect();
     let mut prev: Vec<usize> = (0..n).map(|i| (i + n - 1) % n).collect();
     let mut alive = vec![true; n];
-    let twice_area =
-        |a: usize, b: usize, c: usize| (points[b] - points[a]).perp_dot(points[c] - points[a]);
-    // An ear's fatness: its area over its summed squared sides, largest for an equilateral one.
-    let fatness = |i: usize, prev: &[usize], next: &[usize], alive: &[bool]| -> Option<f32> {
+    let grid = snapped(points);
+    let turn = |a: usize, b: usize, c: usize| turn(grid[a], grid[b], grid[c]);
+    // An ear's soundness, then its fatness: its area over its summed squared sides, largest for an
+    // equilateral one.
+    let ear = |i: usize, prev: &[usize], next: &[usize], alive: &[bool]| -> Option<(bool, f32)> {
         let (a, c) = (prev[i], next[i]);
-        let area = twice_area(a, i, c);
+        let others = || (0..n).filter(|&v| alive[v] && ![a, i, c].contains(&v));
+        let sides = [(a, i), (i, c), (c, a)];
+        if turn(a, i, c) <= 0 || others().any(|v| sides.iter().all(|&(p, q)| turn(p, q, v) >= 0)) {
+            return None;
+        }
         let off_edge = |p: usize, q: usize, v: usize| {
             let edge = points[q] - points[p];
             let t = ((points[v] - points[p]).dot(edge) / edge.length_squared()).clamp(0.0, 1.0);
             points[v].distance(points[p] + edge * t)
         };
-        let lo = points[a].min(points[i]).min(points[c]) - Vec2::splat(ON_EAR_M);
-        let hi = points[a].max(points[i]).max(points[c]) + Vec2::splat(ON_EAR_M);
-        let on = |v: usize| {
-            if points[v].cmplt(lo).any() || points[v].cmpgt(hi).any() {
-                return false; // Outside the ear's box, so farther than ON_EAR_M from it.
-            }
-            let sides = [(a, i), (i, c), (c, a)];
-            sides.iter().all(|&(p, q)| twice_area(p, q, v) >= 0.0)
-                || sides.iter().any(|&(p, q)| off_edge(p, q, v) <= ON_EAR_M)
-        };
-        let blocked = (0..n).any(|v| alive[v] && ![a, i, c].contains(&v) && on(v));
+        let area = (points[i] - points[a]).perp_dot(points[c] - points[a]);
+        let sound = area > STRAIGHT_M2
+            && !others().any(|v| sides.iter().any(|&(p, q)| off_edge(p, q, v) <= ON_EAR_M));
         let spread = points[a].distance_squared(points[i])
             + points[i].distance_squared(points[c])
             + points[c].distance_squared(points[a]);
-        (area > STRAIGHT_M2 && !blocked).then_some(area / spread)
+        Some((sound, area / spread))
     };
-    let mut score: Vec<Option<f32>> = (0..n).map(|i| fatness(i, &prev, &next, &alive)).collect();
+    let mut score: Vec<Option<(bool, f32)>> =
+        (0..n).map(|i| ear(i, &prev, &next, &alive)).collect();
     let mut triangles = Vec::with_capacity(n.saturating_sub(2));
     for _ in 3..n {
         let (i, _) = (0..n)
             .filter(|&i| alive[i])
             .filter_map(|i| score[i].map(|s| (i, s)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+            .max_by(|(_, a), (_, b)| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))?;
         let (a, c) = (prev[i], next[i]);
         triangles.push([a, i, c]);
         alive[i] = false;
         next[a] = c;
         prev[c] = a;
-        score[a] = fatness(a, &prev, &next, &alive);
-        score[c] = fatness(c, &prev, &next, &alive);
+        // A sound ear stays one as vertices leave; any other may gain or lose what blocked it.
+        for j in (0..n).filter(|&j| alive[j]) {
+            if j == a || j == c || !matches!(score[j], Some((true, _))) {
+                score[j] = ear(j, &prev, &next, &alive);
+            }
+        }
     }
     let last = (0..n).find(|&i| alive[i]).expect("three vertices remain");
     let [a, i, c] = [prev[last], last, next[last]];
     triangles.push([a, i, c]);
-    (twice_area(a, i, c) > STRAIGHT_M2).then_some(triangles)
+    (turn(a, i, c) > 0).then_some(triangles)
 }
 
 #[cfg(test)]
@@ -736,25 +778,31 @@ mod tests {
                 .all(|p| b.drawn.iter().any(|q| p.distance(*q) < 1e-5))
     }
 
-    /// Whether no two edges of the closed polygon `points` that share no corner cross.
-    fn simple(points: &[Vec2]) -> bool {
+    /// Whether the closed polygon `points` is drawn clear of folding: each point at least
+    /// [`FOLD_MARGIN_M`] from every edge it does not end, and no two edges crossing on the
+    /// clipper's grid.
+    fn unfolded(points: &[Vec2]) -> bool {
         let n = points.len();
-        let turn = |a: Vec2, b: Vec2, c: Vec2| (b - a).perp_dot(c - a);
-        let cross = |i: usize, j: usize| {
-            let (a, b, c, d) = (
-                points[i],
-                points[(i + 1) % n],
-                points[j],
-                points[(j + 1) % n],
-            );
-            turn(a, b, c) * turn(a, b, d) < 0.0 && turn(c, d, a) * turn(c, d, b) < 0.0
+        let at = |i: usize| points[i % n].as_dvec2();
+        let clear = |i: usize, j: usize| {
+            let (p, a, b) = (at(i), at(j), at(j + 1));
+            let t = ((p - a).dot(b - a) / a.distance_squared(b)).clamp(0.0, 1.0);
+            p.distance(a.lerp(b, t)) >= FOLD_MARGIN_M
         };
-        (0..n).all(|i| (i + 2..n).all(|j| (j + 1) % n == i || !cross(i, j)))
+        let grid = snapped(points);
+        let side = |i: usize, v: usize| turn(grid[i], grid[(i + 1) % n], grid[v % n]).signum();
+        let cross =
+            |i: usize, j: usize| side(i, j) * side(i, j + 1) < 0 && side(j, i) * side(j, i + 1) < 0;
+        (0..n).all(|i| {
+            (0..n)
+                .filter(|&j| i != j && i != (j + 1) % n)
+                .all(|j| clear(i, j) && !cross(i, j))
+        })
     }
 
     /// Chunk `c` drawn beside `breaks` into a mesh of its own, tagged `tag`: each face draws its
-    /// outline as drawn, simple seen along its normal, in `n − 2` triangles for `n` points, each
-    /// facing out of its face and using each outline edge once, as the outline runs; every
+    /// outline as drawn, clear of folding ([`unfolded`]), in `n − 2` triangles for `n` points,
+    /// each facing out of its face and using each outline edge once, as the outline runs; every
     /// outline edge is drawn back by another face, so the surface closes; every vertex carries
     /// `tag`.
     fn assert_drawn(kind: &ConstructionKind, relief: &Relief, c: usize, breaks: &Breaks) {
@@ -768,8 +816,8 @@ mod tests {
         for face in relief.outlines(kind, c, breaks) {
             let n = face.drawn.len();
             assert!(
-                simple(&face.flat(&face.drawn)),
-                "chunk {c}: an outline folds"
+                unfolded(&face.flat(&face.drawn)),
+                "chunk {c}: an outline within the margin of folding"
             );
             let mut used: HashMap<(u32, u32), usize> = HashMap::new();
             for triangle in triangles.by_ref().take(n - 2) {
@@ -812,7 +860,7 @@ mod tests {
 
     /// A BREAK DRAWS CLOSED SURFACES THAT AGREE ACROSS IT. Each relieved chunk of the shipped
     /// house in turn is gone (the rest of its element drawn without it) and alone (a piece of
-    /// one): it and every chunk the break reaches draw a closed mesh of simple outlines and
+    /// one): it and every chunk the break reaches draw a closed mesh of unfolded outlines and
     /// outward triangles ([`assert_drawn`]), a neighbour's face toward the gone chunk matches the
     /// piece's face toward it, and two neighbours draw the face they share alike. The view relies
     /// on it for a rim without slits or dark facets and a piece that fits its hole. An open set
@@ -937,32 +985,57 @@ mod tests {
         }
     }
 
-    /// A SHIFT CARRIED PAST THE FAR EDGE FOLDS, AND ONE THAT STAYS INSIDE DOES NOT: of a unit
-    /// square (fixture), a corner whose shift carries it through the opposite side folds at some
-    /// reach; no shift, and a corner shifted a third of the way in, never do, whether the reach
-    /// is uniform or free to vary by a whole reach per metre. The load gate is this predicate
-    /// ([`Relief::face_may_fold`]): one that passes every outline lets the draw's never-fold panic
-    /// fire in play, and one that holds every outline refuses every relieved construction.
+    /// A SHIFT CARRIED PAST THE FAR EDGE FOLDS, ONE THAT STAYS INSIDE DOES NOT, AND A REACH FREE TO
+    /// VARY FOLDS WHAT A UNIFORM ONE MOVES WHOLE (fixtures). Of a unit square, a corner whose shift
+    /// carries it through the opposite side folds at some reach; no shift, and a corner shifted a
+    /// third of the way in, never do. A slab 0.3 deep whose corners all shift 2 across it moves
+    /// whole under one reach, and folds where the reach may differ by one per metre: its far side
+    /// overtakes its near one. The load gate is this predicate ([`Relief::face_may_fold`]): one
+    /// that passes every outline, or reads the reach at an edge's ends as the reach at the point
+    /// facing it, lets the draw's never-fold panic fire in play, and one that holds every outline
+    /// refuses every relieved construction.
     #[test]
-    fn a_shift_carried_past_the_far_edge_folds_and_one_that_stays_inside_does_not() {
+    fn a_shift_past_the_far_edge_folds_and_so_does_a_reach_free_to_vary() {
         let square = [DVec2::ZERO, DVec2::X, DVec2::ONE, DVec2::Y];
         let moved = |shift: DVec2| [shift, DVec2::ZERO, DVec2::ZERO, DVec2::ZERO];
-        for slope in [0.0, 1.0] {
-            assert!(!folds(&square, &moved(DVec2::ZERO), slope));
-            assert!(!folds(&square, &moved(DVec2::splat(0.3)), slope));
-            assert!(folds(&square, &moved(DVec2::new(1.5, 0.5)), slope));
-        }
+        let folds = |law: &[DVec2], shift: &[DVec2], slope| folds(law, shift, slope, FOLD_MARGIN_M);
+        assert!(!folds(&square, &moved(DVec2::ZERO), 1.0));
+        assert!(!folds(&square, &moved(DVec2::splat(0.3)), 1.0));
+        assert!(folds(&square, &moved(DVec2::new(1.5, 0.5)), 1.0));
+        let slab = square.map(|p| p * DVec2::new(1.0, 0.3));
+        let across = [DVec2::new(0.0, -2.0); 4];
+        assert!(!folds(&slab, &across, 0.0));
+        assert!(folds(&slab, &across, 1.0));
     }
 
-    /// NO BREAK FOLDS A FACE THE LOAD GATE PASSES: under a fixture relief stated in the bake's own
-    /// mean cell width, steep enough to fold some faces, each relieved chunk of the shipped house
-    /// is drawn beside each of its own edges broken alone; every face, hull or cut, that draws an
-    /// outline that is not simple or does not ear-clip is one the gate holds
-    /// ([`Relief::face_may_fold`]), and some do. The draw's never-fold panic relies on it for
-    /// every face any break draws. A gate over a face's law corners alone, blind to the chords
-    /// the draw joins its edge points by, fails here.
+    /// THE CLIPPER CLIPS EVERY SIMPLE OUTLINE, ONE WITH NO SOUND EAR INCLUDED: a square (fixture)
+    /// thirty-two cells of the clipper's grid wide, every ear of it narrower than
+    /// [`STRAIGHT_M2`], clips into two triangles that turn left; a bow-tie does not clip. The
+    /// draw's never-fold panic relies on it: the load gate proves a drawn outline simple, never
+    /// that it holds a sound ear. A clipper that takes sound ears alone fails here.
     #[test]
-    fn no_break_folds_a_face_the_load_gate_passes() {
+    fn the_clipper_clips_every_simple_outline() {
+        let side = (32.0 / GRID_PER_M) as f32;
+        let square = [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y].map(|p| Vec2::ONE + p * side);
+        let triangles = ears(&square).expect("a simple outline clips");
+        assert_eq!(triangles.len(), 2);
+        for [a, b, c] in triangles {
+            assert!((square[b] - square[a]).perp_dot(square[c] - square[a]) > 0.0);
+        }
+        assert_eq!(ears(&[Vec2::ZERO, Vec2::ONE, Vec2::X, Vec2::Y]), None);
+    }
+
+    /// NO BREAK BRINGS A FACE THE LOAD GATE PASSES NEAR FOLDING: under a fixture relief stated in
+    /// the bake's own mean cell width, steep enough that the gate holds some faces, each relieved
+    /// chunk of the shipped house is drawn beside each of its own edges broken alone; every face
+    /// the gate passes ([`Relief::face_may_fold`]), hull or cut, draws an outline clear of folding
+    /// ([`unfolded`]) that clips. Some such faces draw moved points, and some face the gate holds
+    /// is not drawn clear. The margin makes it one verdict on every platform: the gate's own
+    /// allowance ([`ROUNDING_ULPS`]) covers how far their rounding parts two draws. The draw's
+    /// never-fold panic relies on it for every face any break draws. A gate over a face's law
+    /// corners alone, blind to the chords the draw joins its edge points by, fails here.
+    #[test]
+    fn no_break_brings_a_face_the_load_gate_passes_near_folding() {
         let kind = shipped_house();
         let relieved: Vec<usize> = (0..kind.layout.blocks.len())
             .filter(|&c| relief_of(&kind, c).is_some())
@@ -978,11 +1051,15 @@ mod tests {
             edge_pitch_m: Sourced(0.17 * cell),
             units: None,
         };
-        let mut folded = 0;
+        let (mut moved, mut near) = (0, 0);
         for c in relieved {
             let hull = &kind.layout.element_blocks[usize::from(kind.layout.element_of[c])].planes;
+            let faces = kind.layout.blocks[c].faces();
+            let held: Vec<bool> = (faces.iter())
+                .map(|(n, corners)| steep.face_may_fold(hull, *n, corners))
+                .collect();
             let mut seen = HashSet::new();
-            for broken in (kind.layout.blocks[c].faces().iter())
+            for broken in (faces.iter())
                 .flat_map(|(_, corners)| edges(corners))
                 .filter(|&(a, b)| seen.insert(edge(a, b)))
             {
@@ -990,20 +1067,24 @@ mod tests {
                     open: HashSet::new(),
                     edges: vec![broken],
                 };
-                for face in steep.outlines(&kind, c, &breaks) {
+                for (face, held) in steep.outlines(&kind, c, &breaks).iter().zip(&held) {
                     let flat = face.flat(&face.drawn);
-                    if simple(&flat) && ears(&flat).is_some() {
+                    if *held {
+                        near += usize::from(!unfolded(&flat));
                         continue;
                     }
-                    folded += 1;
+                    moved += usize::from(face.drawn != face.corners);
                     assert!(
-                        steep.face_may_fold(hull, face.n, &face.corners),
-                        "chunk {c}: a face folds past the gate"
+                        unfolded(&flat) && ears(&flat).is_some(),
+                        "chunk {c}: a face the gate passes is drawn within the margin of folding"
                     );
                 }
             }
         }
-        assert!(folded > 0, "the steep relief folds a face");
+        assert!(
+            moved > 0 && near > 0,
+            "the steep relief moves faces the gate passes and brings faces it holds near folding"
+        );
     }
 
     /// A RELIEF THAT COULD FOLD A FACE IS REFUSED AT LOAD: the shipped house at a tenth of its
