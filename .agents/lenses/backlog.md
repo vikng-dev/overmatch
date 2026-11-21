@@ -42,6 +42,7 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
+| destruction-13 | P2 | `src/construction/fracture.rs::take_zone` | base-truths: Inferred construction | The fractured zone is a volume budget spent nearest-first through one element's standing chunks (`part_of` is `element_of`), with no radius and buried cells taken, so it stops at the element's edge though piers, sills and lintels are one bonded wall: 200 kg TNT at 1 m (DERIVED 1.92 m³ zone) empties every element it reaches and drops the rest. | Take the zone as a region: the standing matter within r_f = r_c × zone^⅓ of the crushed volume, through bonded joints of one material. | owned by the cutter-zone design (2026-11-21) |
 
 ## ballistics
 
