@@ -34,12 +34,12 @@ House(
             surface_frame: Upright,
             cut: Planar((
                 pitch_m: (0.55, Resolution("the cell a breach is drawn and a wall falls in, and
-                    the count the laws and the view pay for: the hall bakes 1,007 chunks and 3,436
-                    joints (MEASURED), about the village house's count, in a file under the
-                    repository's 1 MB limit. At the house's 0.21 m its 774 brick chunks would be
-                    about 5,300 (DERIVED: the count goes as pitch_m⁻²). A brick chunk is about
-                    92 L (DERIVED: pitch_m² / keep_share through the 0.25 m wall), so a breach
-                    is drawn in cells 2.6 times the house's across")),
+                    the count the laws and the view pay for, held by the bake's byte budget
+                    (`BAKED_BYTES_MAX`, `tools/src/construction.rs`): the hall bakes 1,007 chunks
+                    and 3,436 joints in 939,167 bytes (MEASURED); at the village house's 0.21 m a
+                    draft baked 5.5 MB (MEASURED), with the timber at 0.15 m. A brick chunk is about 92 L (DERIVED:
+                    pitch_m² / keep_share through the 0.25 m wall), so a breach is drawn in cells
+                    2.6 times the house's across")),
                 keep_share: (0.82, Taste("masonry break look, the village house's")),
             )),
         ),
@@ -48,11 +48,12 @@ House(
             // ASSUMED authoring choice: plates run along the authored Z ridge.
             surface_frame: Grain((0.0, 0.0, 1.0)),
             cut: Cells((
-                size_m: (0.25, Resolution("the timber's share of the count the walls' pitch_m
-                    states: the plates, frame and boards bake 233 chunks (MEASURED); at the
-                    village house's 0.15 m, about 1,080 (DERIVED: a member thinner than the
-                    cell keeps a site by its section over size_m², so its count goes as
-                    size_m⁻³)")),
+                size_m: (0.25, Resolution("the cell a timber break is drawn in across the
+                    grain, and the timber's share of the count the walls' pitch_m states: the
+                    plates, frame and boards bake 233 chunks (MEASURED); at the village house's
+                    0.15 m, about 1,080 (DERIVED: a member thinner than the cell keeps a site by
+                    its section over size_m², so its count goes as size_m⁻³), so the hall's
+                    timber breaks in pieces 1.7 times the house's across")),
                 stretch: (5.0, Taste("timber break look, the village house's")),
             )),
         ),
@@ -106,7 +107,10 @@ House(
         (parts: ("lintel", "wall_plate"), by: "mortared"),
         (parts: ("gable", "wall_plate"), by: "mortared"),
         // ASSUMED construction: the ridge beam bedded in its seat in each gable, as a plate on
-        // its wall.
+        // its wall. Laid `resting`, the seat's two upright faces (0.03 m² each, the beam's sides
+        // against the gable's wedges) read a pull at rest in one draft and opened, so the hall
+        // left its baked state at load; whether that pull is the roof's or the solve's is not
+        // settled (backlog destruction-02).
         (parts: ("gable", "ridge"), by: "mortared"),
         // Each rafter nailed to its plate, to the ridge beam and to its pair, each board to the
         // rafters under it and the boards beside it, each ridge segment to the next. The nailed

@@ -105,39 +105,29 @@ pub fn construction(house: &House) -> Result<Construction, String> {
         u,
         v: DVec3::Y,
     };
-    // A gable's profile in its wall's `u`, split around the ridge beam's seat when framed.
+    // A gable's elements in its wall's `u`, each named: whole, or split around the ridge beam's
+    // seat when framed.
+    let at = DVec2::new;
+    let (eave, rake) = (at(inner_w, eaves_y), at(inner_w, underside(inner_w)));
+    let mirror = |p: DVec2| at(-p.x, p.y);
     let gable = || match &house.roof_frame {
-        None => vec![vec![
-            DVec2::new(-inner_w, eaves_y),
-            DVec2::new(inner_w, eaves_y),
-            DVec2::new(inner_w, underside(inner_w)),
-            DVec2::new(0.0, ridge_y),
-            DVec2::new(-inner_w, underside(inner_w)),
-        ]],
+        None => vec![(
+            "gable",
+            vec![mirror(eave), eave, rake, at(0.0, ridge_y), mirror(rake)],
+        )],
         Some(f) => {
             let r = f.ridge_width_m / 2.0;
             let seat = underside(r) - f.ridge_depth_m;
             // Where the roof's underside passes the seat's height.
             let reach = half_w - (seat - plate_y) / slope;
+            let (out, near, top) = (at(reach, seat), at(r, seat), at(r, underside(r)));
             vec![
-                vec![
-                    DVec2::new(-inner_w, eaves_y),
-                    DVec2::new(inner_w, eaves_y),
-                    DVec2::new(inner_w, underside(inner_w)),
-                    DVec2::new(reach, seat),
-                    DVec2::new(-reach, seat),
-                    DVec2::new(-inner_w, underside(inner_w)),
-                ],
-                vec![
-                    DVec2::new(-reach, seat),
-                    DVec2::new(-r, seat),
-                    DVec2::new(-r, underside(r)),
-                ],
-                vec![
-                    DVec2::new(r, seat),
-                    DVec2::new(reach, seat),
-                    DVec2::new(r, underside(r)),
-                ],
+                (
+                    "gable_0",
+                    vec![mirror(eave), eave, rake, out, mirror(out), mirror(rake)],
+                ),
+                ("gable_1", vec![mirror(out), mirror(near), mirror(top)]),
+                ("gable_2", vec![near, out, top]),
             ]
         }
     };
@@ -369,24 +359,19 @@ fn framing(
     }
 }
 
-/// One wall's piers, sills and lintels along its `u`, then its gable's elements (`gables`, convex
-/// profiles) where it carries one.
+/// One wall's piers, sills and lintels along its `u`, then its gable's elements (`gables`, each a
+/// name and a convex profile) where it carries one.
 fn wall_elements(
     wall: &Wall,
     house: &House,
     base_y: f64,
     eaves_y: f64,
-    gables: Vec<Vec<DVec2>>,
+    gables: Vec<(&str, Vec<DVec2>)>,
     pieces: &mut Vec<Piece>,
 ) {
     let course_y = |k: u32| base_y + f64::from(k) * house.course_m;
-    let lone = gables.len() == 1;
-    let mut push = |part: &str, index: usize, profile: Vec<DVec2>| {
-        let name = if part == "gable" && lone {
-            format!("{}/{part}", wall.name)
-        } else {
-            format!("{}/{part}_{index}", wall.name)
-        };
+    let mut place = |element: String, part: &str, profile: Vec<DVec2>| {
+        let name = format!("{}/{element}", wall.name);
         let prism = Prism {
             frame: wall.frame,
             profile,
@@ -395,6 +380,9 @@ fn wall_elements(
         };
         let names = (name, part, wall.name.to_owned());
         pieces.push(piece(&house.parts.walls, names, &prism));
+    };
+    let mut push = |part: &str, index: usize, profile: Vec<DVec2>| {
+        place(format!("{part}_{index}"), part, profile);
     };
     let mut from = wall.u.0;
     for (index, opening) in wall.openings.iter().enumerate() {
@@ -421,7 +409,7 @@ fn wall_elements(
         wall.openings.len(),
         rectangle(from, wall.u.1, base_y, eaves_y),
     );
-    for (index, profile) in gables.into_iter().enumerate() {
-        push("gable", index, profile);
+    for (element, profile) in gables {
+        place(element.to_owned(), "gable", profile);
     }
 }

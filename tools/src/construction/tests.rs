@@ -1321,3 +1321,14 @@ fn cells_follow_stretch_and_grain_rotation() {
         }
     }
 }
+
+/// A BAKE OVER THE BYTE BUDGET IS REFUSED, NAMING ITS SPEC: the repository holds no construction
+/// text over [`BAKED_BYTES_MAX`], and a spec's cut sizes answer to that bound, so a bake at the
+/// bound passes and one byte more is an authored-data refusal.
+#[test]
+fn a_bake_over_the_byte_budget_is_refused_naming_its_spec() {
+    let full = "x".repeat(BAKED_BYTES_MAX);
+    within_budget("a.house.ron", &full).expect("a text at the budget is inside it");
+    let refusal = within_budget("a.house.ron", &format!("{full}x")).unwrap_err();
+    assert!(refusal.starts_with("a.house.ron:"), "{refusal}");
+}

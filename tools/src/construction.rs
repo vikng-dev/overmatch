@@ -273,6 +273,24 @@ pub fn admitted(asset: &ConstructionAsset, spec: &str) -> Result<String, String>
     Ok(text)
 }
 
+/// Resolution: the most bytes a baked construction's text may hold, the orchestrator's standing
+/// repository rule that no file over 1 MB is committed outside LFS (a rule of practice, written
+/// nowhere else in the repository), read here as 10⁶ bytes. The text grows with the chunk and joint
+/// counts, so this is the one budget a spec's cut sizes answer to.
+pub const BAKED_BYTES_MAX: usize = 1_000_000;
+
+/// `text`, the admitted bake of `spec`, refused when it is over [`BAKED_BYTES_MAX`].
+fn within_budget(spec: &str, text: &str) -> Result<(), String> {
+    if text.len() <= BAKED_BYTES_MAX {
+        return Ok(());
+    }
+    Err(format!(
+        "{spec}: its bake is {} bytes, over the {BAKED_BYTES_MAX} a construction file may hold; \
+         coarsen a cut (`pitch_m`, `size_m`)",
+        text.len()
+    ))
+}
+
 /// One admitted bake written under the caller's output root.
 pub struct Written {
     pub asset: ConstructionAsset,
@@ -328,6 +346,7 @@ pub fn bake_to(root: &Path, spec: &Spec) -> Result<Written, BakeError> {
     let asset = bake(&spec.construction, schema::substance_density)
         .map_err(|err| BakeError::Admission(format!("{}: {err}", spec.path)))?;
     let text = admitted(&asset, &spec.path).map_err(BakeError::Admission)?;
+    within_budget(&spec.path, &text).map_err(BakeError::Admission)?;
     let path = asset_path(root, &spec.construction.id);
     let unchanged = match std::fs::read_to_string(&path) {
         Ok(old) => old == text,

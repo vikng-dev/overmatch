@@ -49,8 +49,9 @@ House(
                     the count the laws and the view pay for: this house bakes 1,077 chunks and
                     3,240 joints (MEASURED), a brick chunk about 13.5 L, some seven bricks
                     (DERIVED: the mean scales with pitch_m², and 0.26 m baked 21.2 L, MEASURED).
-                    A finer pitch draws a smoother breach at more cost; the volume a blast removes
-                    does not follow it")),
+                    A finer pitch draws a smoother breach at more cost, up to the bake's byte
+                    budget (`BAKED_BYTES_MAX`, `tools/src/construction.rs`; this file is 920,284
+                    bytes, MEASURED); the volume a blast removes does not follow it")),
                 keep_share: (0.82, Taste("masonry break look: most sites kept for many medium
                     lumps, a few dropped for a few large ones")),
             )),
@@ -60,8 +61,10 @@ House(
             // ASSUMED authoring choice: plates run along the authored Z ridge.
             surface_frame: Grain((0.0, 0.0, 1.0)),
             cut: Cells((
-                size_m: (0.15, Taste("timber break look, as the trees' trunks: shards about a hand
-                    and a half across the grain")),
+                size_m: (0.15, Resolution("the cell a timber break is drawn in across the grain,
+                    about a hand and a half as the trees' trunks, and the timber's share of the
+                    count the walls' pitch_m states: the plates and boards bake 128 chunks
+                    (MEASURED)")),
                 stretch: (5.0, Taste("timber break look: beam pieces several times their breadth
                     long, their broken ends running slant along the grain")),
             )),
@@ -73,8 +76,7 @@ House(
             // Each board is its own piece and component, cut alone; the joins below hold it to the
             // boards beside it, the plates and the gables.
             cut: Cells((
-                size_m: (0.15, Taste("timber break look, as the trees' trunks: shards about a hand
-                    and a half across the grain")),
+                size_m: (0.15, Resolution("as the plates'")),
                 stretch: (5.0, Taste("timber break look: a board breaks across its length into
                     pieces of uneven length, their broken ends running slant along the grain")),
             )),
