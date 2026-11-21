@@ -112,10 +112,9 @@ pub(crate) struct Compaction {
     /// idealization compacts the pores shut and no further).
     pub front_speed: f32,
     /// The volume the fractured zone about a crushed volume spans, per volume crushed
-    /// ([`strike`]): `σ_c,d / 2σ_t,d`, at least one, `σ_t,d` the least dynamic tension the row
-    /// bears (across its grain where it has one). StandIn: the static elastic estimate stands in
-    /// for a dynamic fractured-zone law, which measured fractured volumes against crushed volumes
-    /// under contact charges would settle ([`Compaction::of`] states the law).
+    /// ([`BlastFacts::fractured_zone`]). StandIn: the static elastic estimate stands in for a
+    /// dynamic fractured-zone law, which measured fractured volumes against crushed volumes under
+    /// contact charges would settle.
     pub zone: f32,
 }
 
@@ -146,20 +145,17 @@ impl Spall {
 }
 
 impl Compaction {
-    /// The compaction of a row of bulk density `density` (kg/m³) and least static tension
-    /// `tensile` (Pa) stating `facts`. The registry refuses a row whose fully dense density does
-    /// not exceed its bulk density, so `ε_v > 0`, and one whose zone is not finite in f32.
-    fn of(facts: &BlastFacts, density: f64, tensile: f64) -> Self {
+    /// The compaction of a row of bulk density `density` (kg/m³) stating `facts`, bearing static
+    /// tension `tensile` (Pa) at its seam and `across` its grain. The registry refuses a row whose
+    /// fully dense density does not exceed its bulk density, so `ε_v > 0`, and one whose zone is
+    /// not finite in f32.
+    fn of(facts: &BlastFacts, density: f64, tensile: f64, across: Option<f64>) -> Self {
         let strength = facts.compressive_strength * facts.compressive_dif;
         let lock_up = 1.0 - density / facts.solid_density;
-        // Lamé: a spherical cavity held at `σ_c,d` sets the hoop tension `σ_c,d (r_c / r)³ / 2`
-        // about it, which falls to `σ_t,d` where `(r / r_c)³ = σ_c,d / 2σ_t,d`: the zone's volume
-        // per crushed volume. It holds at least the volume it surrounds, so at least one.
-        let zone = strength / (2.0 * tensile * facts.tensile_dif);
         Self {
             strength: strength as f32,
             front_speed: (strength * lock_up / density).sqrt() as f32,
-            zone: zone.max(1.0) as f32,
+            zone: facts.fractured_zone(tensile, across) as f32,
         }
     }
 }
@@ -238,15 +234,11 @@ impl Material {
                 Some(along) => Grain::Unlaid { along },
                 None => Grain::None,
             },
-            // The hoop tension is alike every way about the cavity, so the weakest way parts it:
-            // across the grain where the row has one, else the seam's tension.
             compaction: Compaction::of(
                 &blast,
                 bulk.density,
-                match bulk.across_grain_tensile_strength {
-                    Some(across) => across,
-                    None => static_tensile,
-                },
+                static_tensile,
+                bulk.across_grain_tensile_strength,
             ),
             spall: Spall::of(&blast, bulk.density, static_tensile),
             seam,
