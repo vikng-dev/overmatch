@@ -1060,6 +1060,12 @@ impl Assessment {
             .sum()
     }
 
+    /// The joints gravity alone overloads as built.
+    #[cfg(test)]
+    pub(crate) fn initial_verdict(&self) -> &[Failure] {
+        &self.initial_verdict
+    }
+
     pub(crate) fn needs_tick(&self) -> bool {
         !self.initialized
             || !self.initial_verdict.is_empty()

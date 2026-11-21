@@ -297,8 +297,44 @@ pub struct House {
     /// What each part is made of, how its surface runs and how it is cut.
     pub parts: Parts,
     pub walls: Walls,
+    /// Interior walls across the ridge, each carrying a gable to the roof.
+    pub cross_walls: Vec<CrossWall>,
+    /// Timber framing under the boards; without it the boards lie on the plates and gables.
+    pub roof_frame: Option<RoofFrame>,
     /// What holds the parts of two components where they touch, by their elements' part names.
     pub joins: Vec<Join>,
+}
+
+/// One interior wall across the ridge: its centre's `z`, its thickness and its openings, `u` along
+/// `+X` between the long walls' inner faces.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrossWall {
+    pub name: String,
+    pub at_z_m: f64,
+    pub thickness_m: f64,
+    pub openings: Vec<Opening>,
+}
+
+/// Timber framing under the roof boards, metres: a rafter pair over each gable-carrying wall's
+/// centre line and at even centres between, bearing on the wall plates and on a ridge beam seated
+/// in the gables. Each member's grain runs along its length.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoofFrame {
+    /// A key of `assets/materials/materials.ron`.
+    pub material: String,
+    pub cut: PartCut,
+    pub rafter_width_m: f64,
+    /// Across the slope.
+    pub rafter_depth_m: f64,
+    /// The largest centre spacing of rafter pairs.
+    pub rafter_spacing_m: f64,
+    /// How far each rafter runs past its long wall's outer face.
+    pub eaves_overhang_m: f64,
+    pub ridge_width_m: f64,
+    /// Below the roof's underside at the beam's faces.
+    pub ridge_depth_m: f64,
 }
 
 /// The house's three parts: every wall's piers, sills, lintels and gable; the wall plates on the
@@ -330,6 +366,16 @@ pub enum PartCut {
     /// Cells through the element's depth, the wall's thickness.
     Planar(PlanarRule),
     Cells(super::fracture::Cells),
+}
+
+impl PartCut {
+    fn check(&self) -> Result<(), String> {
+        match self {
+            Self::Whole => Ok(()),
+            Self::Planar(rule) => rule.check(),
+            Self::Cells(cells) => cells.check(),
+        }
+    }
 }
 
 /// The openings of each wall.
@@ -366,12 +412,7 @@ impl House {
             ("parts.roof", &self.parts.roof),
         ] {
             check_frame(name, part.surface_frame)?;
-            match &part.cut {
-                PartCut::Whole => Ok(()),
-                PartCut::Planar(rule) => rule.check(),
-                PartCut::Cells(cells) => cells.check(),
-            }
-            .map_err(|err| format!("{name}.cut: {err}"))?;
+            (part.cut.check()).map_err(|err| format!("{name}.cut: {err}"))?;
         }
         let positive = |v: f64| v.is_finite() && v > 0.0;
         for (name, value) in [
@@ -393,8 +434,41 @@ impl House {
         if self.pitch.0 == 0 || self.pitch.1 == 0 || self.boards_per_slope == 0 {
             return Err("a roof needs a pitch and boards".into());
         }
+        let inner_l = 0.5 * self.length_m - self.wall_thickness_m;
+        for (i, wall) in self.cross_walls.iter().enumerate() {
+            if wall.name.trim().is_empty()
+                || ["east", "west", "north", "south"].contains(&wall.name.as_str())
+                || self.cross_walls[..i].iter().any(|w| w.name == wall.name)
+            {
+                return Err(format!(
+                    "cross_walls[{i}].name: author a unique name no outer wall has"
+                ));
+            }
+            let (near, far) = (
+                wall.at_z_m - wall.thickness_m / 2.0,
+                wall.at_z_m + wall.thickness_m / 2.0,
+            );
+            if !(positive(wall.thickness_m) && near > -inner_l && far < inner_l)
+                || self.cross_walls[..i].iter().any(|w| {
+                    (w.at_z_m - wall.at_z_m).abs() <= (w.thickness_m + wall.thickness_m) / 2.0
+                })
+            {
+                return Err(format!(
+                    "cross_walls[{i}]: place a wall of positive thickness inside the gable walls, apart from the others"
+                ));
+            }
+        }
+        if let Some(frame) = &self.roof_frame {
+            self.check_frame_members(frame)?;
+        }
         check_holds(&self.foundation_attachment, &self.joins)?;
-        for (wall, openings) in self.walls.iter() {
+        let interior = 0.5 * self.width_m - self.wall_thickness_m;
+        let walls = self
+            .walls
+            .iter()
+            .into_iter()
+            .chain((self.cross_walls.iter()).map(|w| (w.name.as_str(), w.openings.as_slice())));
+        for (wall, openings) in walls {
             for opening in openings {
                 let (bottom, head) = opening.courses;
                 if !(opening.u.0 < opening.u.1 && bottom < head && head <= self.eaves_course) {
@@ -406,7 +480,11 @@ impl House {
             // The generator splits the wall into a pier before, between and after the openings,
             // in `u` order: each one lies inside the wall's face with a pier of some width on
             // either side, so no two overlap or touch and none reaches a corner.
-            let (start, end) = self.wall_span(wall);
+            let (start, end) = if self.cross_walls.iter().any(|w| w.name == wall) {
+                (-interior, interior)
+            } else {
+                self.wall_span(wall)
+            };
             let mut spans: Vec<(f64, f64)> = openings.iter().map(|opening| opening.u).collect();
             spans.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut from = start;
@@ -425,6 +503,52 @@ impl House {
                      end at {end}"
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Refuses framing whose members cannot stand where the generator lays them: each
+    /// gable-carrying wall must hold its rafter within its thickness, and the ridge beam's seat
+    /// must lie in each gable, above the roof's underside at the long walls' inner faces.
+    fn check_frame_members(&self, frame: &RoofFrame) -> Result<(), String> {
+        frame
+            .cut
+            .check()
+            .map_err(|err| format!("roof_frame.cut: {err}"))?;
+        for (name, value) in [
+            ("rafter_width_m", frame.rafter_width_m),
+            ("rafter_depth_m", frame.rafter_depth_m),
+            ("rafter_spacing_m", frame.rafter_spacing_m),
+            ("ridge_width_m", frame.ridge_width_m),
+            ("ridge_depth_m", frame.ridge_depth_m),
+        ] {
+            if !(value.is_finite() && value > 0.0) {
+                return Err(format!(
+                    "roof_frame.{name} {value} is not a positive length"
+                ));
+            }
+        }
+        if !(frame.eaves_overhang_m.is_finite() && frame.eaves_overhang_m >= 0.0) {
+            return Err("roof_frame.eaves_overhang_m: author a finite non-negative length".into());
+        }
+        let thinnest =
+            (self.cross_walls.iter().map(|w| w.thickness_m)).fold(self.wall_thickness_m, f64::min);
+        if frame.rafter_width_m >= thinnest {
+            return Err(format!(
+                "roof_frame.rafter_width_m: a rafter over a gable-carrying wall must lie within \
+                 its {thinnest} m thickness"
+            ));
+        }
+        // The seat's height over the roof's underside at the long walls' inner faces.
+        let slope = f64::from(self.pitch.0) / f64::from(self.pitch.1);
+        let inner = 0.5 * self.width_m - self.wall_thickness_m;
+        let seat = slope * (inner - frame.ridge_width_m / 2.0) - frame.ridge_depth_m;
+        if !(frame.ridge_width_m < 2.0 * inner && seat > 0.0) {
+            return Err(
+                "roof_frame.ridge_width_m/ridge_depth_m: seat the ridge beam in the gables: \
+                 narrower than the inside, and shallower than the gable's rise over its faces"
+                    .into(),
+            );
         }
         Ok(())
     }

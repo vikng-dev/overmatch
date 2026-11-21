@@ -588,7 +588,10 @@ pub(crate) mod tests {
     /// destruction model), whatever it builds: each asset under `assets/constructions/` passes the
     /// map's load gate (law blocks, collider mass and inertia, attachments and root plates) and
     /// spawns one collider per element and none per chunk, its whole chunk table in its breakage
-    /// state from spawn. A refused asset or a spawn of a collider per chunk fails here.
+    /// state from spawn. Its own weight parts none of its joints: the authority commits a gravity
+    /// overload on its first tick, so a join too weak for the dead load it is built under would
+    /// shed pieces as every match opens. A refused asset, a spawn of a collider per chunk or a
+    /// construction that does not stand as built fails here.
     #[test]
     fn every_shipped_construction_is_admitted_and_stands_as_its_elements() {
         let assets = shipped_assets();
@@ -607,6 +610,8 @@ pub(crate) mod tests {
         let library = ConstructionLibrary::load(&assets, ids.iter().map(String::as_str));
         for id in &ids {
             let kind = library.get(id).expect("the library holds every loaded id");
+            let overloads = kind.equilibrium.initial_verdict();
+            assert!(overloads.is_empty(), "{id}: {overloads:?}");
             let (mut world, root) = spawned(kind, Transform::IDENTITY);
             let colliders = world.query::<&Collider>().iter(&world).count();
             assert_eq!(colliders, kind.asset.elements.len(), "{id}");

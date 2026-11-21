@@ -49,7 +49,7 @@ Where code and prose disagree, the code wins, and the row says so.
 
 | Item | Producer | Read by | Class | Evidence |
 |---|---|---|---|---|
-| `tools/constructions/{fir_1.pieces,house_1.house}.ron` | hand-authored, tracked | `bake-constructions` (`tools/src/bin/bake-constructions.rs`) | **B** | A stage reads `tools/`, writes `assets/`, in canonical bytes, and its tests bake twice (`tools/src/lib.rs:3-6`). |
+| `tools/constructions/{fir_1.pieces,house_1.house,hall_1.house}.ron` | hand-authored, tracked | `bake-constructions` (`tools/src/bin/bake-constructions.rs`) | **B** | A stage reads `tools/`, writes `assets/`, in canonical bytes, and its tests bake twice (`tools/src/lib.rs:3-6`). |
 | `assets/constructions/<id>/<id>.construction.ron` | `bake-constructions` | `ConstructionLibrary::load`; the digest (`map.rs:500-501`) | **B**. Header: "Written by the construction bake … Do not edit." | The bake writes only what the game's gate admits (`bake-constructions.rs:4`). |
 | `assets/constructions/<id>/<id>.dressing.ron` | `scripts/prop/build.py`, a tracked Blender pipeline that certifies its source, view and cutter input and re-exports to compare bytes (`build.py:1-8`) | the construction view | **B**: tracked inputs, reproducible output, a "Regenerate rather than edit" header (`fir_1.dressing.ron:1`). | |
 | `assets/trees/fir_1/` (`.blend`, `.glb`, `.lod.json`, `.tree.ron`) | Blender source, its export, the LOD certificate | the prop and LOD pipelines (ADR-0033, ADR-0035) | **B** | Source and product both tracked (ADR-0036). |

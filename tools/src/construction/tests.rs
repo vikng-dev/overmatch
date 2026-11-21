@@ -207,7 +207,7 @@ fn every_interface_is_one_contact() {
     }
 }
 
-/// Every shipped house generator's spec, then the fixture house.
+/// Every shipped house generator's spec, then the fixture house, bare and framed.
 fn houses() -> Vec<House> {
     let dir = crate::repo_root().join(SPECS_DIR);
     let mut houses: Vec<House> = std::fs::read_dir(&dir)
@@ -216,7 +216,7 @@ fn houses() -> Vec<House> {
         .filter(|path| path.to_string_lossy().ends_with(HOUSE_SUFFIX))
         .map(|path| House::from_ron(&std::fs::read_to_string(&path).unwrap()).unwrap())
         .collect();
-    houses.push(fixture_house());
+    houses.extend([fixture_house(), framed_fixture_house()]);
     houses
 }
 
@@ -296,6 +296,8 @@ const FIXTURE_HOUSE: &str = r#"House(
         ))),
     ),
     walls: (east: [], west: [], north: [], south: []),
+    cross_walls: [],
+    roof_frame: None,
     joins: [
         (parts: ("pier", "pier"), by: "mortared"),
         (parts: ("pier", "wall_plate"), by: "mortared"),
@@ -308,6 +310,22 @@ const FIXTURE_HOUSE: &str = r#"House(
 
 fn fixture_house() -> House {
     House::from_ron(FIXTURE_HOUSE).expect("the constructed fixture states a house")
+}
+
+/// FIXTURE DATA: the fixture house with one cross wall and a roof frame, its boards on rafters.
+fn framed_fixture_house() -> House {
+    let text = FIXTURE_HOUSE
+        .replace(
+            "cross_walls: []",
+            r#"cross_walls: [(name: "inner", at_z_m: 0.5, thickness_m: 0.25, openings: [])]"#,
+        )
+        .replace(
+            "roof_frame: None",
+            r#"roof_frame: Some((material: "Wood", cut: Whole, rafter_width_m: 0.1,
+                rafter_depth_m: 0.2, rafter_spacing_m: 1.0, eaves_overhang_m: 0.1,
+                ridge_width_m: 0.15, ridge_depth_m: 0.25))"#,
+        );
+    House::from_ron(&text).expect("the constructed fixture states a framed house")
 }
 
 /// FIXTURE DATA: a planar cut through `depth`, sites `pitch_m` apart, every one kept.
@@ -1107,10 +1125,32 @@ fn a_house_the_generator_cannot_lay_out_is_refused() {
         unreachable!("the fixture's plates are cut in cells")
     };
     cells.size_m.0 = f64::INFINITY;
+    let framed = framed_fixture_house();
+    framed.check().expect("the constructed frame stands");
+    let mut outside = framed.clone();
+    outside.cross_walls[0].at_z_m = 0.5 * outside.length_m;
+    let mut twice = framed.clone();
+    twice.cross_walls.push(twice.cross_walls[0].clone());
+    let (mut wide, mut deep) = (framed.clone(), framed);
+    let framing = "the fixture is framed";
+    wide.roof_frame.as_mut().expect(framing).rafter_width_m = wide.wall_thickness_m;
+    deep.roof_frame.as_mut().expect(framing).ridge_depth_m = deep.width_m;
     for (case, broken, field) in [
         ("past the wall", past, "pier"),
         ("over the next", over, "pier"),
         ("an endless piece", endless, "parts.plates.cut"),
+        ("a cross wall in a gable wall", outside, "cross_walls[0]"),
+        ("a cross wall's name taken", twice, "cross_walls[1].name"),
+        (
+            "a rafter wider than its wall",
+            wide,
+            "roof_frame.rafter_width_m",
+        ),
+        (
+            "a ridge beam deeper than the gable",
+            deep,
+            "roof_frame.ridge_width_m/ridge_depth_m",
+        ),
     ] {
         let err = broken.check().unwrap_err();
         assert!(err.contains(field), "{case}: {err}");

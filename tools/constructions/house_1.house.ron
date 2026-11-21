@@ -96,6 +96,9 @@ House(
         north: [(u: (-0.5, 0.5), courses: (18, 33))],
         south: [(u: (-0.5, 0.5), courses: (18, 33))],
     ),
+    // No interior walls, and no roof frame: the boards lie on the plates and gables.
+    cross_walls: [],
+    roof_frame: None,
     // How the parts of two components are held where they touch, by their elements' part names (either
     // order): the attachment kind (`assets/materials/attachments.ron`, which holds every kind's
     // strength); inside a component its chunks hold by its own seam. The bake refuses a touching
