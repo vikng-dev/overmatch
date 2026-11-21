@@ -26,6 +26,7 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
+| view-26 | P3 | `src/construction/view.rs::run`; `ElementLook::of` | base-truths: Inferred construction | An element's run is guessed as its hull's longest level edge and its depth as run × Y, its leaves counted from the face that edge's sign picks, so an element narrower than its wall is thick swaps run and depth (none shipped: the narrowest brick pier is 0.55 m against a 0.25 m wall). | Bake each element's run into the construction asset and read it in the view (a FORMAT bump and a re-bake of every construction). | ratchet |
 
 
 ## dev
