@@ -312,7 +312,8 @@ fn fixture_house() -> House {
     House::from_ron(FIXTURE_HOUSE).expect("the constructed fixture states a house")
 }
 
-/// FIXTURE DATA: the fixture house with one cross wall and a roof frame, its boards on rafters.
+/// FIXTURE DATA: the fixture house with one cross wall and a roof frame, its boards on rafters and
+/// its joins the framed roof's.
 fn framed_fixture_house() -> House {
     let text = FIXTURE_HOUSE
         .replace(
@@ -324,8 +325,31 @@ fn framed_fixture_house() -> House {
             r#"roof_frame: Some((material: "Wood", cut: Whole, rafter_width_m: 0.1,
                 rafter_depth_m: 0.2, rafter_spacing_m: 1.0, eaves_overhang_m: 0.1,
                 ridge_width_m: 0.15, ridge_depth_m: 0.25))"#,
-        );
+        )
+        .replace(
+            r#"(parts: ("wall_plate", "roof"), by: "nailed"),"#,
+            r#"(parts: ("rafter", "wall_plate"), by: "nailed"),
+            (parts: ("rafter", "ridge"), by: "nailed"),
+            (parts: ("rafter", "rafter"), by: "nailed"),
+            (parts: ("ridge", "ridge"), by: "nailed"),
+            (parts: ("roof", "rafter"), by: "nailed"),
+            (parts: ("gable", "ridge"), by: "mortared"),"#,
+        )
+        .replace(r#"("gable", "roof")"#, r#"("gable", "rafter")"#);
     House::from_ron(&text).expect("the constructed fixture states a framed house")
+}
+
+/// A FRAMED ROOF BEARS WHERE ITS JOINS SAY. The bake refuses a touching pair no join names and a
+/// join no pair makes, so the framed fixture bakes under exactly its joins only while every
+/// rafter lies on its plate, on the ridge beam and against its pair, a rafter lies on each
+/// gable's rake, the ridge segments meet end to end in the gables' seats, and the boards lie on
+/// the rafters alone, clear of the plates and gables. The roof's response reads those joints.
+/// Mutants: a rafter short of its plate or ridge, a beam out of its seat, boards left on the
+/// plates.
+#[test]
+fn a_framed_roof_bears_where_its_joins_say() {
+    let framed = house::construction(&framed_fixture_house()).expect("the frame is laid out");
+    bake(&framed, schema::substance_density).expect("each join holds, and nothing else touches");
 }
 
 /// FIXTURE DATA: a planar cut through `depth`, sites `pitch_m` apart, every one kept.
