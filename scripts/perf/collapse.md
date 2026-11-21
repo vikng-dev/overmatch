@@ -60,6 +60,14 @@ grade still in place (every corner within the recipe's `in_place_m`, a labelled 
 volume-weighted displacement of what still stands on a body, the opening in `plan.panel` (the
 component the approaching tank meets first, chosen before play), and the largest loose piece.
 
+`ram-hall-wall.json` and `ram-hall-gable.json` are the same pass through the village hall
+(`village_hall_0001`, 12 × 16 m): face-on through the middle of its west long wall, and end-on
+through its north gable at the doorway. The run-up is laid from the instance's origin, so the
+hall's walls stand 6 and 8 m inside it, and the long wall's approach climbs 0.9 m on the way: under
+`ram.json`'s margin of 2 the hull met the wall at 9.87 m/s, short of the 9.98 m/s admission
+(MEASURED, one local run), so both recipes state 3, with the approach time that takes. Their
+deadline is 10 s, for a building 12 and 16 m through.
+
 `--clip PLAN`, local `--ram` only, is `scripts/debris-lab`'s: the driving client renders the
 capture plan's frames on a hidden window, in the run's folder (the plan's relative paths land
 there) and with its own settings folder. Its frames open on the tank's approach to the recipe's
