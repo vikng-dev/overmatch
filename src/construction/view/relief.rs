@@ -937,23 +937,49 @@ mod tests {
         }
     }
 
-    /// NO BREAK FOLDS A FACE THE LOAD GATE PASSES: under a relief four times the shipped
-    /// amplitude (fixture), each relieved chunk of the shipped house is drawn beside each of its
-    /// own edges broken alone; every face, hull or cut, that draws an outline that is not simple or
-    /// does not ear-clip is one the gate holds ([`Relief::face_may_fold`]), and some do. The
-    /// draw's never-fold panic relies on it for every face any break draws. A gate over a face's
-    /// law corners alone, blind to the chords the draw joins its edge points by, fails here.
+    /// A SHIFT CARRIED PAST THE FAR EDGE FOLDS, AND ONE THAT STAYS INSIDE DOES NOT: of a unit
+    /// square (fixture), a corner whose shift carries it through the opposite side folds at some
+    /// reach; no shift, and a corner shifted a third of the way in, never do, whether the reach
+    /// is uniform or free to vary by a whole reach per metre. The load gate is this predicate
+    /// ([`Relief::face_may_fold`]): one that passes every outline lets the draw's never-fold panic
+    /// fire in play, and one that holds every outline refuses every relieved construction.
+    #[test]
+    fn a_shift_carried_past_the_far_edge_folds_and_one_that_stays_inside_does_not() {
+        let square = [DVec2::ZERO, DVec2::X, DVec2::ONE, DVec2::Y];
+        let moved = |shift: DVec2| [shift, DVec2::ZERO, DVec2::ZERO, DVec2::ZERO];
+        for slope in [0.0, 1.0] {
+            assert!(!folds(&square, &moved(DVec2::ZERO), slope));
+            assert!(!folds(&square, &moved(DVec2::splat(0.3)), slope));
+            assert!(folds(&square, &moved(DVec2::new(1.5, 0.5)), slope));
+        }
+    }
+
+    /// NO BREAK FOLDS A FACE THE LOAD GATE PASSES: under a fixture relief stated in the bake's own
+    /// mean cell width, steep enough to fold some faces, each relieved chunk of the shipped house
+    /// is drawn beside each of its own edges broken alone; every face, hull or cut, that draws an
+    /// outline that is not simple or does not ear-clip is one the gate holds
+    /// ([`Relief::face_may_fold`]), and some do. The draw's never-fold panic relies on it for
+    /// every face any break draws. A gate over a face's law corners alone, blind to the chords
+    /// the draw joins its edge points by, fails here.
     #[test]
     fn no_break_folds_a_face_the_load_gate_passes() {
         let kind = shipped_house();
-        let (_, mut steep) = (parse(SHIPPED)
-            .expect("the shipped reliefs")
-            .into_iter()
-            .next())
-        .expect("a shipped relief");
-        steep.amplitude_m.0 *= 4.0;
+        let relieved: Vec<usize> = (0..kind.layout.blocks.len())
+            .filter(|&c| relief_of(&kind, c).is_some())
+            .collect();
+        let volume: f32 = relieved
+            .iter()
+            .map(|&c| kind.structure.chunks[c].volume)
+            .sum();
+        let cell = (volume / relieved.len() as f32).cbrt();
+        let steep = Relief {
+            amplitude_m: Sourced(0.26 * cell),
+            wavelength_m: Sourced(0.37 * cell),
+            edge_pitch_m: Sourced(0.17 * cell),
+            units: None,
+        };
         let mut folded = 0;
-        for c in (0..kind.layout.blocks.len()).filter(|&c| relief_of(&kind, c).is_some()) {
+        for c in relieved {
             let hull = &kind.layout.element_blocks[usize::from(kind.layout.element_of[c])].planes;
             let mut seen = HashSet::new();
             for broken in (kind.layout.blocks[c].faces().iter())
