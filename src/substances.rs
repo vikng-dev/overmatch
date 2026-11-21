@@ -181,6 +181,11 @@ pub struct BulkFacts {
     /// grain it bears `blast.compressive_strength`. `None`: it bears alike every way. The bearing
     /// law reads both (`construction::fracture::Material::bearing`).
     pub along_grain_compressive_strength: Option<f64>,
+    /// The tension it bears across its grain, Pa, where its seam's [`Self::tensile`] is the
+    /// strength along it: below `tensile` and beside a blast block (checked at parse). `None`:
+    /// `tensile` is the least tension it bears. The fractured-zone law reads the least
+    /// (`construction::fracture::Compaction`).
+    pub across_grain_tensile_strength: Option<f64>,
 }
 
 /// An isotropic solid's plane-strain contact compliance `(1 − ν²) / E`, 1/Pa, with Poisson's ratio
@@ -213,7 +218,8 @@ impl Compliance {
 /// Material inputs of the game's environment blast laws. SI units. The crush law (Law 1,
 /// `construction::fracture::Compaction`) reads the compression, its ratio and the fully dense
 /// density; the scab law (Law 2, `construction::fracture::Spall`) reads the modulus and the tensile
-/// ratio, which raises the row's `bulk.tensile`. Sources and the scope of each analogue
+/// ratio, which raises the row's `bulk.tensile`; the fractured-zone law reads the dynamic
+/// compression and the tensile ratio. Sources and the scope of each analogue
 /// live in `assets/materials/materials.ron` and `.agents/scratch/blast-b3-material-sources.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlastFacts {
@@ -231,10 +237,6 @@ pub struct BlastFacts {
     /// Dynamic/static tensile-strength ratio over the row's `bulk.tensile`, at least one: a
     /// reference-rate datum whose rate its provenance states, as [`Self::compressive_dif`] is.
     pub tensile_dif: f64,
-    /// The volume an impulsively crushed volume's fractured zone spans, per crushed volume, at
-    /// least one: the zone holds the volume it surrounds. Its provenance names the law it stands
-    /// in for.
-    pub fractured_zone: f64,
 }
 
 /// What a round's burst block reads of the substance its burst core is made of. SI units.
@@ -461,6 +463,7 @@ struct BulkFile {
     shear_modulus: Option<Sourced<f64>>,
     blast: Option<BlastFile>,
     along_grain_compressive_strength: Option<Sourced<f64>>,
+    across_grain_tensile_strength: Option<Sourced<f64>>,
 }
 
 impl BulkFile {
@@ -469,18 +472,42 @@ impl BulkFile {
             || self.fracture_energy.is_some()
             || self.shear_cohesion.is_some()
             || self.shear_fracture_energy.is_some();
+        let tensile = self.tensile.as_ref().map(|value| value.0);
+        let across_grain_tensile_strength = self.across_grain_tensile_strength.map(|value| value.0);
+        if let Some(across) = across_grain_tensile_strength {
+            if !(across.is_finite() && across > 0.0) {
+                return Err(format!(
+                    "substance {name:?}: bulk.across_grain_tensile_strength must be finite and \
+                     positive (got {across}); author the tension across the grain in Pa with its \
+                     material-property source"
+                ));
+            }
+            if self.blast.is_none() {
+                return Err(format!(
+                    "substance {name:?}: bulk.across_grain_tensile_strength stands beside no \
+                     bulk.blast, whose fractured-zone law reads it: author the blast block, or \
+                     drop the across-grain tension"
+                ));
+            }
+            if !tensile.is_some_and(|tensile| across < tensile) {
+                return Err(format!(
+                    "substance {name:?}: bulk.across_grain_tensile_strength ({across} Pa) must lie \
+                     below bulk.tensile ({tensile:?}), the seam's strength along the grain: author \
+                     the tension across the grain with its source, or drop it where the seam's is \
+                     the least"
+                ));
+            }
+        }
         let blast = match self.blast {
-            Some(file) => Some(file.facts(
-                name,
-                self.density.0,
-                self.tensile.as_ref().map(|value| value.0),
-            )?),
+            Some(file) => {
+                Some(file.facts(name, self.density.0, tensile, across_grain_tensile_strength)?)
+            }
             None if breakable => {
                 return Err(format!(
                     "substance {name:?}: bulk.blast is missing from a breakable material: author \
                      compressive_strength (Pa), compressive_dif, solid_density (kg/m³), \
-                     youngs_modulus (Pa), tensile_dif and fractured_zone, each with its \
-                     material-property source"
+                     youngs_modulus (Pa) and tensile_dif, each with its material-property \
+                     source"
                 ));
             }
             // Bulk-only matter is unbreakable, so the blast material laws never read it.
@@ -524,6 +551,7 @@ impl BulkFile {
             shear_modulus: self.shear_modulus.map(|value| value.0 as f32),
             blast,
             along_grain_compressive_strength,
+            across_grain_tensile_strength,
         })
     }
 }
@@ -538,13 +566,19 @@ struct BlastFile {
     solid_density: Option<Sourced<f64>>,
     youngs_modulus: Option<Sourced<f64>>,
     tensile_dif: Option<Sourced<f64>>,
-    fractured_zone: Option<Sourced<f64>>,
 }
 
 impl BlastFile {
-    /// The block's facts for a row of bulk `density` (kg/m³) and static `tensile` strength (Pa),
-    /// or why the row is refused.
-    fn facts(self, name: &str, density: f64, tensile: Option<f64>) -> Result<BlastFacts, String> {
+    /// The block's facts for a row of bulk `density` (kg/m³), static `tensile` strength (Pa) and
+    /// tension `across` its grain (Pa, below `tensile`, checked by the caller), or why the row is
+    /// refused.
+    fn facts(
+        self,
+        name: &str,
+        density: f64,
+        tensile: Option<f64>,
+        across: Option<f64>,
+    ) -> Result<BlastFacts, String> {
         let required = |field, value: Option<Sourced<f64>>| {
             let value = value
                 .ok_or_else(|| {
@@ -568,7 +602,6 @@ impl BlastFile {
             solid_density: required("solid_density", self.solid_density)?,
             youngs_modulus: required("youngs_modulus", self.youngs_modulus)?,
             tensile_dif: required("tensile_dif", self.tensile_dif)?,
-            fractured_zone: required("fractured_zone", self.fractured_zone)?,
         };
         let tensile = tensile.ok_or_else(|| {
             format!(
@@ -580,12 +613,6 @@ impl BlastFile {
             return Err(format!(
                 "substance {name:?}: bulk.blast.tensile_dif must be at least one; author the \
                  dynamic/static tensile ratio with its material-property source"
-            ));
-        }
-        if facts.fractured_zone < 1.0 {
-            return Err(format!(
-                "substance {name:?}: bulk.blast.fractured_zone must be at least one, the crushed \
-                 volume it surrounds; author the zone per crushed volume with its source"
             ));
         }
         if facts.compressive_dif < 1.0 {
@@ -611,6 +638,11 @@ impl BlastFile {
         let strength = facts.compressive_strength * facts.compressive_dif;
         let lock_up = 1.0 - density / facts.solid_density;
         let front_speed = (strength * lock_up / density).sqrt();
+        // The least tension it bears: across its grain where it states one, else its seam's.
+        let least = match across {
+            Some(across) => across,
+            None => tensile,
+        };
         for (field, value) in [
             ("bulk.tensile (static tensile strength)", tensile),
             (
@@ -629,7 +661,11 @@ impl BlastFile {
                 "bulk.blast.youngs_modulus (bar wave speed)",
                 (facts.youngs_modulus / density).sqrt(),
             ),
-            ("bulk.blast.fractured_zone", facts.fractured_zone),
+            (
+                "the fractured zone, bulk.blast.compressive_strength * compressive_dif over twice \
+                 the least tension times bulk.blast.tensile_dif",
+                (strength / (2.0 * least * facts.tensile_dif)).max(1.0),
+            ),
         ] {
             let stored = value as f32;
             if !stored.is_finite() || stored <= 0.0 {
@@ -1290,8 +1326,7 @@ mod tests {
                         compressive_dif: Some((2.0, Fixture("fixture"))),
                         solid_density: Some((2500.0, Fixture("fixture"))),
                         youngs_modulus: Some((8e9, Fixture("fixture"))),
-                        tensile_dif: Some((3.0, Fixture("fixture"))),
-                        fractured_zone: Some((4.0, Fixture("fixture")))))))),"#,
+                        tensile_dif: Some((3.0, Fixture("fixture")))))))),"#,
             ))
         };
         let path = std::path::Path::new("fixture/materials.ron");
@@ -1330,8 +1365,7 @@ mod tests {
                         compressive_dif: Some((2.0, Fixture("fixture"))),
                         solid_density: Some((2500.0, Fixture("fixture"))),
                         youngs_modulus: Some((8e9, Fixture("fixture"))),
-                        tensile_dif: Some((3.0, Fixture("fixture"))),
-                        fractured_zone: Some((4.0, Fixture("fixture")))))))),"#,
+                        tensile_dif: Some((3.0, Fixture("fixture")))))))),"#,
             ))
         };
         let path = std::path::Path::new("fixture/materials.ron");
@@ -1415,6 +1449,56 @@ mod tests {
         refusal("1e7", "bulk.blast.compressive_strength");
     }
 
+    /// A TENSION ACROSS THE GRAIN IS POSITIVE, BELOW THE SEAM'S AND BESIDE A BLAST BLOCK (the
+    /// game's environment destruction model). The fractured-zone law reads it as the least
+    /// tension the row bears and divides by it, so a zero, negative or non-finite value, one not
+    /// below `bulk.tensile`, or one on matter with no blast block is refused at load naming the
+    /// row, the field and the repair; one below the seam's loads. Fixture data.
+    #[test]
+    fn an_across_grain_tension_loads_only_positive_below_the_seams_beside_a_blast_block() {
+        let fixture = r#""Fixture": Hard(resistance: Effective((20.0, Fixture("fixture"))),
+                visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))), debris_half_angle_deg: (26.2, Fixture("fixture")),"#;
+        let breakable = |across: &str| {
+            with(&format!(
+                r#"{fixture}
+                bulk: Some((density: (1800.0, Fixture("fixture")),
+                    tensile: Some((1.0e6, Fixture("fixture"))),
+                    fracture_energy: Some((10.0, Fixture("fixture"))),
+                    shear_modulus: Some((3e9, Fixture("fixture"))),
+                    shear_cohesion: Some((200000.0, Fixture("fixture"))),
+                    shear_fracture_energy: Some((30.0, Fixture("fixture"))),
+                    blast: Some((compressive_strength: Some((20e6, Fixture("fixture"))),
+                        compressive_dif: Some((2.0, Fixture("fixture"))),
+                        solid_density: Some((2500.0, Fixture("fixture"))),
+                        youngs_modulus: Some((8e9, Fixture("fixture"))),
+                        tensile_dif: Some((3.0, Fixture("fixture"))))),
+                    across_grain_tensile_strength: Some(({across}, Fixture("fixture")))))),"#
+            ))
+        };
+        let refusal = |text: String, cause: &str| {
+            let err = SubstanceRegistry::from_ron(&text).unwrap_err().to_string();
+            for required in [
+                "Fixture",
+                "bulk.across_grain_tensile_strength",
+                cause,
+                "author",
+            ] {
+                assert!(err.contains(required), "{required}: {err}");
+            }
+        };
+        SubstanceRegistry::from_ron(&breakable("1e5")).expect("a tension below the seam's loads");
+        for invalid in ["0.0", "-1.0", "NaN", "inf"] {
+            refusal(breakable(invalid), "finite and positive");
+        }
+        refusal(breakable("1e6"), "below bulk.tensile");
+        let bare = with(&format!(
+            r#"{fixture}
+                bulk: Some((density: (500.0, Fixture("fixture")),
+                    across_grain_tensile_strength: Some((1e5, Fixture("fixture")))))),"#
+        ));
+        refusal(bare, "bulk.blast");
+    }
+
     /// BREAKABLE BLAST INPUTS ARE COMPLETE AND SOURCED BEFORE PLAY (the game's environment
     /// destruction model). The crush law and the scab law rely on no missing field becoming a
     /// code default, on finite positive inputs in the simulation's f32 units, and on nonzero
@@ -1428,7 +1512,6 @@ mod tests {
             ("solid_density", "2500.0"),
             ("youngs_modulus", "8e9"),
             ("tensile_dif", "3.0"),
-            ("fractured_zone", "4.0"),
         ];
         let authored: Vec<String> = fields
             .iter()
@@ -1520,7 +1603,6 @@ mod tests {
             (1, "1e40", "compressive_dif"),
             (4, "0.5", "tensile_dif"),
             (4, "1e40", "tensile_dif"),
-            (5, "0.5", "fractured_zone"),
         ] {
             let mut invalid = authored.clone();
             invalid[index] = authored[index].replace(fields[index].1, value);

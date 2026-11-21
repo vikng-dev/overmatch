@@ -718,11 +718,14 @@ born in: 76 µs a single-chunk piece (MEASURED), a few milliseconds when one ele
 single chunks at once.
 
 **A blast removes the fractured zone about what it crushes** (`fracture::strike`). A face load's
-Law 1 volume times its row's `bulk.blast.fractured_zone` is the zone: it spends its own chunk's
-pool, then the pools of its part's standing chunks nearest its point, and each pool it spends turns
-its chunk to dust. The number is a `StandIn` for the dynamic fractured-zone law; its value and what
-would settle it are the row's. Taken from the part's matter, the removed volume follows the burst
-and not the cut (**Representation**). A cell the zone wears without spending is drawn whole: the
+Law 1 volume times `σ_c,d / 2σ_t,d`, at least one, is the zone (`fracture::Compaction::zone`),
+`σ_t,d` the least dynamic tension the row bears, across the grain for wood (the hoop tension is
+alike every way about the cavity, so the weakest way parts it): it spends its own chunk's pool,
+then the pools of its part's standing chunks nearest its point, and each pool it spends turns its
+chunk to dust. The ratio is the static Lamé estimate, the volume within which a cavity held at
+`σ_c,d` sets a hoop tension above `σ_t,d`, a `StandIn` for a dynamic fractured-zone law that
+measured fractured volumes against crushed volumes under contact charges would settle. Taken from
+the part's matter, the removed volume follows the burst and not the cut (**Representation**). A cell the zone wears without spending is drawn whole: the
 view cuts no dish for a face load, only for a scab's removal and a round's channel, and per-chunk
 wear past an element's first is not on the wire. The effect is server state, decided inside each
 owner's deposit evaluation and committed in the existing deposit order, parallel by owner like
