@@ -184,7 +184,7 @@ pub struct BulkFacts {
     /// The tension it bears across its grain, Pa, where its seam's [`Self::tensile`] is the
     /// strength along it: below `tensile` and beside a blast block (checked at parse). `None`:
     /// `tensile` is the least tension it bears. The fractured-zone law reads the least
-    /// (`construction::fracture::Compaction`).
+    /// ([`BlastFacts::fractured_zone`]).
     pub across_grain_tensile_strength: Option<f64>,
 }
 
@@ -237,6 +237,23 @@ pub struct BlastFacts {
     /// Dynamic/static tensile-strength ratio over the row's `bulk.tensile`, at least one: a
     /// reference-rate datum whose rate its provenance states, as [`Self::compressive_dif`] is.
     pub tensile_dif: f64,
+}
+
+impl BlastFacts {
+    /// The fractured zone's volume per volume crushed, dimensionless, of a row bearing static
+    /// tension `tensile` (Pa) at its seam and `across` its grain where it states one. Lamé: a
+    /// spherical cavity held at `σ_c,d` sets the hoop tension `σ_c,d (r_c / r)³ / 2` about it,
+    /// which falls to `σ_t,d` where `(r / r_c)³ = σ_c,d / 2σ_t,d`. The hoop tension is alike
+    /// every way about the cavity, so the least tension parts it: across the grain where the row
+    /// has one, else the seam's. A zone holds at least the volume it surrounds, so at least one.
+    pub fn fractured_zone(&self, tensile: f64, across: Option<f64>) -> f64 {
+        let least = match across {
+            Some(across) => across,
+            None => tensile,
+        };
+        let strength = self.compressive_strength * self.compressive_dif;
+        (strength / (2.0 * least * self.tensile_dif)).max(1.0)
+    }
 }
 
 /// What a round's burst block reads of the substance its burst core is made of. SI units.
@@ -638,11 +655,6 @@ impl BlastFile {
         let strength = facts.compressive_strength * facts.compressive_dif;
         let lock_up = 1.0 - density / facts.solid_density;
         let front_speed = (strength * lock_up / density).sqrt();
-        // The least tension it bears: across its grain where it states one, else its seam's.
-        let least = match across {
-            Some(across) => across,
-            None => tensile,
-        };
         for (field, value) in [
             ("bulk.tensile (static tensile strength)", tensile),
             (
@@ -664,7 +676,7 @@ impl BlastFile {
             (
                 "the fractured zone, bulk.blast.compressive_strength * compressive_dif over twice \
                  the least tension times bulk.blast.tensile_dif",
-                (strength / (2.0 * least * facts.tensile_dif)).max(1.0),
+                facts.fractured_zone(tensile, across),
             ),
         ] {
             let stored = value as f32;
