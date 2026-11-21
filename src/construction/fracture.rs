@@ -12,6 +12,7 @@
 pub(crate) mod bondsolve;
 pub(crate) mod parts;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::{f32::consts::PI, sync::Arc};
 
 use bevy::ecs::entity::Entity;
@@ -310,11 +311,15 @@ pub(crate) struct Chunk {
 }
 
 impl Chunk {
+    /// The radius of its equal-volume sphere, m.
+    fn radius(&self) -> f64 {
+        (3.0 * f64::from(self.volume) / (4.0 * std::f64::consts::PI)).cbrt()
+    }
+
     /// DERIVED inertia of the equal-volume sphere, 2 m r² / 5. This geometric assessment
     /// approximation is independent of the occupied hull tensor used by physics bodies.
     fn intrinsic_inertia(&self) -> f64 {
-        let radius = (3.0 * f64::from(self.volume) / (4.0 * std::f64::consts::PI)).cbrt();
-        2.0 * f64::from(self.mass) * radius * radius / 5.0
+        2.0 * f64::from(self.mass) * self.radius().powi(2) / 5.0
     }
 }
 
@@ -1207,19 +1212,17 @@ pub(crate) struct Struck {
     pub cracked: Vec<usize>,
 }
 
-/// Run `loads` through the removal and the push rule, in that order: every load's crushed volume
-/// wears its chunk's pool, then every load's energy stresses the joints still live ([`crack`]). A
-/// load that crushes nothing wears nothing. A load stating its peak, a pressure pulse's, takes
-/// the fractured zone about what it crushes instead ([`Compaction::zone`] times it) from the
-/// matter nearest it ([`take_zone`]). Support is the caller's next step ([`loose_groups`],
-/// [`fall`]), so a check that must see the cracks before support (the structural one) runs
-/// between.
+/// Run `loads` through the removal and the push rule, in that order: every pressure pulse's
+/// fractured zones leave the pools ([`fractured`]), then every other load's crushed volume wears
+/// its chunk's (so a scab's removal follows its face's zone), then every load's energy stresses
+/// the joints still live ([`crack`]). A load that crushes nothing wears nothing. Support is the
+/// caller's next step ([`loose_groups`], [`fall`]), so a check that must see the cracks before
+/// support (the structural one) runs between.
 pub(crate) fn strike(structure: &Structure, state: &mut State, loads: &[Load]) -> Struck {
     let mut struck = Struck::default();
-    for load in loads.iter().filter(|load| load.crushed > 0.0) {
-        if load.peak.is_some() {
-            take_zone(structure, state, load, &mut struck);
-        } else if wear(structure, state, load.chunk, load.crushed) {
+    fractured(structure, state, loads, &mut struck);
+    for load in (loads.iter()).filter(|load| load.peak.is_none() && load.crushed > 0.0) {
+        if wear(structure, state, load.chunk, load.crushed) {
             struck.dusted.push(load.chunk);
         } else if state.standing(load.chunk) {
             struck.worn.push(load.chunk);
@@ -1233,34 +1236,101 @@ pub(crate) fn strike(structure: &Structure, state: &mut State, loads: &[Load]) -
     struck
 }
 
-/// The fractured zone about pressure pulse `load`'s crushed volume, taken from its chunk's pool,
-/// then from the standing chunks of its part (a convex solid) nearest its point in turn, until the
-/// zone or the part is spent; each pool it spends turns to dust ([`wear`]). The volume a load
-/// takes is then its part's matter and never its cut: one block and the same block cut finer
-/// lose the same volume, the finer cut spending whole pools where the coarse one wears one.
-fn take_zone(structure: &Structure, state: &mut State, load: &Load, struck: &mut Struck) {
-    let mut left = load.crushed * structure.chunks[load.chunk].material.compaction.zone;
-    let part = structure.part_of[load.chunk];
-    let reach = |c: usize| structure.chunks[c].centroid.distance_squared(load.at);
-    let mut nearest: Vec<usize> = (0..structure.chunks.len())
-        .filter(|&c| structure.part_of[c] == part && state.standing(c))
-        .collect();
-    nearest.sort_by(|&a, &b| {
-        (a != load.chunk)
-            .cmp(&(b != load.chunk))
-            .then(reach(a).total_cmp(&reach(b)))
-            .then(a.cmp(&b))
-    });
-    for c in nearest {
-        if left <= 0.0 {
-            break;
+/// The standing chunks the hoop tension about a cavity in standing chunk `c` reaches next: those
+/// of `c`'s material as laid, across an uncracked seam of that material's own. ASSUMED: the field
+/// is one unbroken solid's, so it ends at another material, at a fixing and at a crack.
+fn continued<'a>(
+    structure: &'a Structure,
+    state: &'a State,
+    c: usize,
+) -> impl Iterator<Item = usize> + 'a {
+    let material = structure.chunks[c].material;
+    (state.topology.neighbours[c].iter())
+        .filter(move |&&(n, j)| {
+            state.standing(n)
+                && !state.cracked[j]
+                && structure.chunks[n].material == material
+                && structure.joints[j].bond == Bond::Bonded(material.seam)
+        })
+        .map(|&(n, _)| n)
+}
+
+/// The fractured zone, about the game's environment destruction (game state only): the pressure
+/// pulses of `loads` (those stating a peak) remove the standing matter within `r_f` of each
+/// volume they crush, worn from the pools into `struck`.
+///
+/// - **A crushed volume** is the pulse loads on chunks joined to one another by [`continued`]:
+///   `V_c` (m³) the sum of their Law 1 volumes, at their volume-weighted point. Law 1 is linear in
+///   the impulse, so `V_c` is its face's however the face is cut.
+/// - **Radius.** ASSUMED a half-ball on the struck face, `r_c = (3 V_c / 2π)^⅓` m, whatever dish
+///   the pulse crushed, held at `σ_c,d` in an unbounded solid (no free face enters the field). Its
+///   hoop tension `σ_c,d (r_c / r)³ / 2` falls to `σ_t,d` at `r_f = r_c k^⅓`, `k` the row's
+///   [`Compaction::zone`], so the half-ball of `r_f` holds `k V_c`.
+/// - **Region.** The chunks [`continued`] reaches from the crushed ones, each while its
+///   equal-volume sphere comes within `r_f` of the point: across elements of one bonded wall,
+///   through buried matter, never past another material or a crack.
+/// - **Spent.** Each crushed chunk gives its own Law 1 volume, then the region gives the rest of
+///   `k V_c` nearest first, the last chunk worn and not emptied: the zone removes a volume, never
+///   a count of chunks. Where matter fills the half-ball the volume binds and the cut does not
+///   show; in a thin wall, at an edge or beside another material the radius binds, to one chunk's
+///   sphere, and the zone removes what stands inside it.
+fn fractured(structure: &Structure, state: &mut State, loads: &[Load], struck: &mut Struck) {
+    let mut crushed = BTreeMap::<usize, (f32, Vec3)>::new();
+    for load in loads.iter().filter(|load| load.peak.is_some()) {
+        let (volume, moment) = crushed.entry(load.chunk).or_default();
+        *volume += load.crushed;
+        *moment += load.at * load.crushed;
+    }
+    crushed.retain(|_, (volume, _)| *volume > 0.0);
+    while let Some((first, (mut volume, mut moment))) = crushed.pop_first() {
+        // An earlier zone of this deposit may have taken it.
+        if !state.standing(first) {
+            continue;
         }
-        let taken = left.min(state.pool[c]);
-        left -= taken;
-        if wear(structure, state, c, taken) {
-            struck.dusted.push(c);
-        } else {
-            struck.worn.push(c);
+        let mut own = vec![(first, volume)];
+        let mut next = 0;
+        while let Some(&(c, _)) = own.get(next) {
+            next += 1;
+            for n in continued(structure, state, c) {
+                if let Some((more, at)) = crushed.remove(&n) {
+                    own.push((n, more));
+                    volume += more;
+                    moment += at;
+                }
+            }
+        }
+        let at = moment / volume;
+        let zone = structure.chunks[first].material.compaction.zone * volume;
+        let radius = (1.5 * zone / PI).cbrt();
+        let reach = |c: usize| {
+            let chunk = &structure.chunks[c];
+            chunk.centroid.distance(at) - chunk.radius() as f32
+        };
+        let mut region: Vec<usize> = own.iter().map(|&(c, _)| c).collect();
+        let mut seen: BTreeSet<usize> = region.iter().copied().collect();
+        let mut next = 0;
+        while let Some(&c) = region.get(next) {
+            next += 1;
+            for n in continued(structure, state, c) {
+                if reach(n) <= radius && seen.insert(n) {
+                    region.push(n);
+                }
+            }
+        }
+        region.sort_by(|&a, &b| reach(a).total_cmp(&reach(b)).then(a.cmp(&b)));
+        let mut left = zone;
+        let rest = region.iter().map(|&c| (c, f32::INFINITY));
+        for (c, most) in own.iter().copied().chain(rest) {
+            let taken = left.min(most).min(state.pool[c]);
+            if !state.standing(c) || taken <= 0.0 {
+                continue;
+            }
+            left -= taken;
+            if wear(structure, state, c, taken) {
+                struck.dusted.push(c);
+            } else {
+                struck.worn.push(c);
+            }
         }
     }
 }
@@ -3096,8 +3166,8 @@ mod tests {
     /// MOMENTUM SETS THE CRUSHED MASS (the game's environment destruction model, the #237 study's
     /// test 1). At a fixed peak pressure a face patch of each shipped breakable material crushes
     /// `Δm = J f(σ_c,d / P) / u_c`, so doubling its impulse doubles the mass; and the pool gives
-    /// a blast load's fractured zone (its crushed volume times the row's [`Compaction::zone`]),
-    /// whatever diagnostic energy the ray carries. Law 1 and the crater
+    /// a blast load's fractured zone (its crushed volume times the row's [`Compaction::zone`],
+    /// [`fractured`]), whatever diagnostic energy the ray carries. Law 1 and the crater
     /// footprint rely on it: a law reading the energy, squaring the impulse, or a pool worn by
     /// the blast's energy fails here. Fixture pressures, impulses and energies.
     #[test]
@@ -3302,16 +3372,17 @@ mod tests {
         }
     }
 
-    /// A BLAST TAKES THE SAME VOLUME HOWEVER FINELY ITS PART IS CUT (the game's environment
-    /// destruction model): the fractured zone about a face's crushed volume comes from its part's
-    /// matter nearest it ([`take_zone`]). One fixture brick slab and the same slab cut into 32 × 32
-    /// cells, under the same rays (a near burst's, cast on the whole slab and each keyed to the
-    /// cell it stops on), lose the same volume to its faces' loads to f32 rounding, the slab
-    /// wearing where the cells nearest the burst turn to dust. A zone held to the cell a face lies
-    /// on fails here; a breach whose size follows the burst and not the bake's cell size rests on
-    /// it. Fixture geometry and burst.
+    /// A BLAST TAKES THE SAME VOLUME HOWEVER ITS WALL IS CUT (the game's environment destruction
+    /// model): where matter fills the half-ball of `r_f`, the fractured zone is `k V_c`
+    /// ([`fractured`]). One fixture brick slab, the same slab cut into 32 × 32 bonded cells, and
+    /// those cells baked as two elements meeting inside the zone, under the same rays (a near
+    /// burst's, cast on the whole slab and each keyed to the cell it stops on), lose the same
+    /// volume to its faces' loads to f32 rounding, the slab wearing where the cells nearest the
+    /// burst turn to dust, and the two bakes of the cells lose it from the same cells. A zone
+    /// held to the cell a face lies on, or to the element it was baked in, fails here; a breach
+    /// whose size follows the burst and not the bake rests on it. Fixture geometry and burst.
     #[test]
-    fn a_blast_takes_the_same_volume_however_finely_its_part_is_cut() {
+    fn a_blast_takes_the_same_volume_however_its_wall_is_cut() {
         let material = brick();
         let (side, thick, n) = (2.0_f32, 0.25_f32, 32);
         let low = Vec3::new(-0.5 * side, -0.5 * side, 0.0);
@@ -3321,6 +3392,25 @@ mod tests {
             .map(|k| {
                 let corner = low + Vec3::new((k % n) as f32, (k / n) as f32, 0.0) * size;
                 Block::cuboid(corner, corner + Vec3::new(size, size, thick))
+            })
+            .collect();
+        // Each cell bonded to its right and upper neighbour.
+        let seams: Vec<Joint> = (0..n * n)
+            .flat_map(|k| {
+                let right = (k % n + 1 < n).then_some((k + 1, Vec3::X));
+                let upper = (k / n + 1 < n).then_some((k + n, Vec3::Y));
+                [right, upper]
+                    .into_iter()
+                    .flatten()
+                    .map(move |(b, normal)| (k, b, normal))
+            })
+            .map(|(a, b, normal)| Joint {
+                a,
+                b: Side::Chunk(b),
+                area: size * thick,
+                centroid: (cells[a].max + cells[b].min) / 2.0,
+                normal,
+                bond: Bond::Bonded(material.seam),
             })
             .collect();
         let blast = Blast::of(1.47e6, 1e-3, FIT_ONLY_PRODUCTS);
@@ -3333,7 +3423,7 @@ mod tests {
             blast,
             &ball_directions(16_384),
         );
-        let removed = |blocks: &[Block], hits: &[(usize, RayHit)]| {
+        let pools = |blocks: &[Block], joints: &[Joint], part_of: Vec<usize>, hits: &[_]| {
             let structure = Structure {
                 chunks: blocks
                     .iter()
@@ -3348,8 +3438,8 @@ mod tests {
                         }
                     })
                     .collect(),
-                part_of: vec![0; blocks.len()],
-                joints: Vec::new(),
+                part_of,
+                joints: joints.to_vec(),
                 geometry: bondsolve::Geometry::CircularFixture,
             };
             // The faces' loads alone: Law 2 reads each face's own rays, so a scab is no part of
@@ -3368,7 +3458,7 @@ mod tests {
                 .zip(&state.pool)
                 .map(|(chunk, pool)| full_pool(chunk) - pool)
                 .sum::<f32>();
-            (spent, state.fate)
+            (spent, state)
         };
         let inside = |block: &Block, at: Vec3| {
             (block.min - at).max_element() <= ON_PLANE && (at - block.max).max_element() <= ON_PLANE
@@ -3381,25 +3471,123 @@ mod tests {
             })
             .collect();
         let zone = material.compaction.zone * hits.iter().map(|(_, hit)| hit.crushed).sum::<f32>();
-        let (whole, slab_fate) = removed(std::slice::from_ref(&slab), &hits);
-        let (cut, cell_fates) = removed(&cells, &keyed);
+        // The elements meet on the cell boundary nearest the burst's foot, inside its zone.
+        let boundary = ((origin.x - low.x) / size).round() as usize;
+        let halves = (0..n * n).map(|k| usize::from(k % n >= boundary)).collect();
+        let (whole, slab_state) = pools(std::slice::from_ref(&slab), &[], vec![0], &hits);
+        let (cut, cell_state) = pools(&cells, &seams, vec![0; n * n], &keyed);
+        let (_, halved_state) = pools(&cells, &seams, halves, &keyed);
         println!(
             "MEASURED fixture zone {zone:.4e} m³, a cell {:.4e} m³",
             size * size * thick
         );
         assert!(
-            zone > size * size * thick && slab_fate == [Fate::Standing],
+            zone > size * size * thick && slab_state.fate == [Fate::Standing],
             "the zone outgrows a cell and not the slab"
         );
+        let dust = |state: &State, part: usize| {
+            (0..n * n)
+                .any(|k| state.fate[k] == Fate::Dust && usize::from(k % n >= boundary) == part)
+        };
         assert!(
-            cell_fates.contains(&Fate::Dust),
-            "cells nearest the burst go"
+            dust(&cell_state, 0) && dust(&cell_state, 1),
+            "cells either side of the boundary go"
         );
         assert!((whole / zone - 1.0).abs() < 1e-5, "the slab gives the zone");
         assert!(
             (cut / whole - 1.0).abs() < 1e-5,
             "cut {cut} m³, whole {whole} m³"
         );
+        assert!(
+            halved_state == cell_state,
+            "an element boundary changes what the zone takes"
+        );
+    }
+
+    /// A ZONE STOPS AT ITS RADIUS AND WHERE ITS SOLID ENDS (the game's environment destruction
+    /// model): a pulse crushing `V_c` at the middle of a fixture brick plate one cell thick
+    /// removes the cells whose equal-volume spheres come within `r_f = (3 k V_c / 2π)^⅓` of its
+    /// point and touches no other, though the plate holds less inside than `k V_c`; and a column
+    /// of another material, of fixed seams or of cracked seams beside the point bounds it, the
+    /// cells past the column untouched ([`fractured`]). A breach no wider than its burst's reach
+    /// in a thin wall, and one that stops at a timber frame, rest on it: a zone spending its
+    /// volume with no radius, or flooding past another material, a fixing or a crack, fails
+    /// here. Fixture geometry and crushed volume.
+    #[test]
+    fn a_zone_stops_at_its_radius_and_where_its_solid_ends() {
+        let (w, cell) = (13_usize, 0.25_f32);
+        let plate = grid(w, w);
+        let struck = (w / 2) * w + w / 2;
+        let at = plate.chunks[struck].centroid;
+        let zone = plate.chunks[struck].material.compaction.zone;
+        // Fixture: a zone four cells in radius, far more than a plate one cell thick holds.
+        let radius = 4.0 * cell;
+        let crushed = 2.0 * PI * radius.powi(3) / (3.0 * zone);
+        let inside: Vec<usize> = (0..w * w)
+            .filter(|&c| {
+                let chunk = &plate.chunks[c];
+                chunk.centroid.distance(at) - (0.75 * chunk.volume / PI).cbrt() <= radius
+            })
+            .collect();
+        let held: f32 = inside.iter().map(|&c| plate.chunks[c].volume).sum();
+        assert!(held < zone * crushed, "the radius binds, not the volume");
+        let pulse = Load {
+            chunk: struck,
+            at,
+            energy: 0.0,
+            crushed,
+            blow: Vec3::ZERO,
+            press: Vec3::ZERO,
+            peak: Some(Vec3::ZERO),
+            origin: Origin::Field,
+        };
+        let taken = |structure: &Structure, state: &mut State| -> Vec<usize> {
+            strike(structure, state, &[pulse]);
+            (0..w * w)
+                .filter(|&c| state.pool[c] < full_pool(&structure.chunks[c]))
+                .collect()
+        };
+        let mut state = State::new(&plate);
+        assert_eq!(taken(&plate, &mut state), inside, "the cells within r_f");
+        assert!(
+            inside.iter().all(|&c| state.fate[c] == Fate::Dust),
+            "each gives its whole pool"
+        );
+
+        // The column of seams two cells right of the struck cell, inside the radius.
+        let edge = w / 2 + 2;
+        let past = |c: usize| c % w >= edge;
+        let crosses = |joint: &Joint| match joint.b {
+            Side::Chunk(b) => past(joint.a) != past(b),
+            Side::Ground => false,
+        };
+        let mut timber = plate.clone();
+        for c in (0..w * w).filter(|&c| past(c)) {
+            timber.chunks[c].material = wood();
+        }
+        let mut fixed = plate.clone();
+        for joint in fixed.joints.iter_mut().filter(|joint| crosses(joint)) {
+            let seam = joint.seam().expect("the fixture plate's joints are seams");
+            joint.bond = Bond::Bonded(Seam {
+                fixing: Some(Fixing {
+                    normal: 1.0,
+                    shear: 1.0,
+                }),
+                ..seam
+            });
+        }
+        let mut cracked = State::new(&plate);
+        for (j, joint) in plate.joints.iter().enumerate() {
+            cracked.cracked[j] = crosses(joint);
+        }
+        for (name, structure, mut state) in [
+            ("another material", &timber, State::new(&timber)),
+            ("a fixing", &fixed, State::new(&fixed)),
+            ("a crack", &plate, cracked),
+        ] {
+            let near: Vec<usize> = inside.iter().copied().filter(|&c| !past(c)).collect();
+            assert_eq!(taken(structure, &mut state), near, "{name}");
+        }
     }
 
     /// A BLAST RAY'S PEAK FORCE IS ITS PEAK PRESSURE OVER THE PATCH ITS PUSH LOADS: square on, at
